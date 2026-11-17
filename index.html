@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0" />
+  <title>Halation Optical Studio — Analog Film Emulsion &amp; Lossless Photo Processor</title>
+  <meta name="description" content="Configure authentic 35mm motion-picture film halation effects with real-time GPU slide toggles and full-resolution lossless photo export." />
+  <meta name="theme-color" content="#0b0c0e" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <!-- Studio Header Bar -->
+  <header class="studio-header">
+    <div class="brand-group">
+      <div class="brand-aperture" aria-hidden="true"></div>
+      <div class="brand-titles">
+        <h1>Halation Optical Studio</h1>
+        <span class="brand-subtitle">35mm Remjet-Free Emulsion Scatter Engine</span>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <input type="file" id="file-input" accept="image/*,.png,.jpg,.jpeg,.webp,.avif,.bmp,.tiff" hidden />
+      <button type="button" id="upload-photo-btn" class="btn" title="Upload a photo from your device">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="17 8 12 3 7 8" />
+          <line x1="12" y1="3" x2="12" y2="15" />
+        </svg>
+        <span>Open Photo</span>
+      </button>
+
+      <button type="button" id="hold-compare-btn" class="btn btn-ghost" title="Press and hold (or Spacebar) to view original input">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+          <circle cx="12" cy="12" r="3" />
+        </svg>
+        <span class="hide-xs">Hold Original</span>
+      </button>
+
+      <button type="button" id="reset-all-btn" class="btn btn-ghost" title="Reset all sliders and toggles to default">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+          <path d="M3 3v5h5" />
+        </svg>
+        <span class="hide-xs">Reset</span>
+      </button>
+
+      <a href="./halation-studio-github-pages.zip" download="halation-studio-github-pages.zip" id="download-repo-zip-btn" class="btn" title="Download the complete GitHub Pages repository as a .zip file" style="text-decoration: none;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 8v13H3V8" />
+          <path d="M1 3h22v5H1z" />
+          <path d="M10 12h4" />
+        </svg>
+        <span class="hide-xs">Repo .ZIP</span>
+      </a>
+
+      <button type="button" id="header-export-btn" class="btn btn-primary" title="Export full-resolution image without losing quality">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+        <span>Export Lossless</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Studio Workspace -->
+  <main class="studio-workspace">
+    <!-- Left/Center Optical Viewport -->
+    <section class="viewport-pane" aria-label="Optical Photo Preview">
+      <!-- Top Bar: Built-in Test Examples & Split Comparison Mode -->
+      <div class="viewport-top-bar">
+        <div class="sample-switcher" role="group" aria-label="Test Example Photos">
+          <span class="sample-label">Test Scenes:</span>
+          <button type="button" id="sample-btn-1" class="sample-chip active" data-sample="example1">
+            <span class="sample-dot"></span>
+            <span>Example 1: Night Kiosk</span>
+          </button>
+          <button type="button" id="sample-btn-2" class="sample-chip" data-sample="example2">
+            <span class="sample-dot"></span>
+            <span>Example 2: Streetlamp</span>
+          </button>
+          <span id="custom-photo-chip" class="sample-chip" style="display: none;">
+            <span class="sample-dot"></span>
+            <span id="custom-photo-name">Custom Photo</span>
+          </span>
+        </div>
+
+        <div class="compare-mode-group" role="group" aria-label="Comparison View Mode">
+          <button type="button" id="view-mode-single" class="mode-btn" data-mode="single">Full Result</button>
+          <button type="button" id="view-mode-split" class="mode-btn active" data-mode="split-input">Split vs Input</button>
+          <button type="button" id="view-mode-ref" class="mode-btn" data-mode="split-expected" title="Compare live engine output directly against the expected reference output image">Split vs Expected</button>
+        </div>
+      </div>
+
+      <!-- Interactive Canvas Stage -->
+      <div id="canvas-stage" class="canvas-stage">
+        <div id="stage-transform-wrap" class="stage-transform-wrap">
+          <canvas id="render-canvas"></canvas>
+
+          <!-- Split Curtain Overlay (Original Input or Expected Reference) -->
+          <div id="comparison-overlay" class="comparison-overlay">
+            <img id="compare-img" alt="Comparison reference layer" draggable="false" />
+          </div>
+
+          <!-- Draggable Split Divider -->
+          <div id="split-divider" class="split-divider" style="left: 50%;" role="slider" aria-label="Before and after split position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" tabindex="0">
+            <div class="split-handle-pill">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 18 9 12 15 6"></polyline>
+                <polyline points="9 18 15 12 9 6" transform="translate(6, 0)"></polyline>
+              </svg>
+            </div>
+          </div>
+
+          <span id="split-badge-left" class="split-badge left">Original Input</span>
+          <span id="split-badge-right" class="split-badge right">Halation Studio</span>
+        </div>
+
+        <!-- Drag & Drop Photo Overlay -->
+        <div id="dropzone-overlay" class="dropzone-overlay">
+          <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="var(--accent-halation)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <polyline points="21 15 16 10 5 21" />
+          </svg>
+          <p style="font-size: 15px; font-weight: 600;">Drop Photo for Lossless Halation Processing</p>
+          <span style="font-size: 12px; color: var(--text-secondary);">Processed 100% locally on your GPU at native resolution</span>
+        </div>
+      </div>
+
+      <!-- Bottom Viewport HUD: Native Resolution & Zoom Controls -->
+      <div class="viewport-hud">
+        <div class="hud-pill">
+          <span id="hud-dimensions"><strong>667 × 1000</strong> px</span>
+          <span>•</span>
+          <span class="quality-tag" id="hud-pipeline-status">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            1:1 Native Quality
+          </span>
+        </div>
+
+        <div class="zoom-controls" role="group" aria-label="Viewport Zoom">
+          <button type="button" id="zoom-out-btn" class="zoom-btn" title="Zoom out">−</button>
+          <button type="button" id="zoom-reset-btn" class="zoom-btn" title="Reset zoom to fit">100%</button>
+          <button type="button" id="zoom-in-btn" class="zoom-btn" title="Zoom in">+</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Control Rack -->
+    <aside class="control-rack" aria-label="Halation Effect Controls">
+      <!-- Mobile Tab Switcher -->
+      <nav class="mobile-tab-bar" aria-label="Control Categories">
+        <button type="button" class="mobile-tab-btn active" data-tab-target="halation">Halation</button>
+        <button type="button" class="mobile-tab-btn" data-tab-target="toggles">Slide Toggles</button>
+        <button type="button" class="mobile-tab-btn" data-tab-target="presets">Presets</button>
+      </nav>
+
+      <div class="rack-scroll">
+        <!-- Section 1: Primary Halation Sliders -->
+        <section class="control-section mobile-active" data-mobile-tab="halation" aria-labelledby="heading-primary-sliders">
+          <div class="section-header">
+            <h2 id="heading-primary-sliders" class="section-title">
+              <span class="section-dot"></span>
+              Emulsion Scatter &amp; Glow
+            </h2>
+            <span style="font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted);">Double-click slider to reset</span>
+          </div>
+
+          <!-- Strength -->
+          <div class="slider-group" id="group-strength">
+            <div class="slider-header">
+              <label for="slider-strength" class="slider-label">Halation Intensity</label>
+              <span id="val-strength" class="slider-value">135%</span>
+            </div>
+            <input type="range" id="slider-strength" class="range-slider" min="0" max="200" step="1" value="135" data-param="strength" data-unit="%" />
+          </div>
+
+          <!-- Spread / Radius -->
+          <div class="slider-group" id="group-radius">
+            <div class="slider-header">
+              <label for="slider-radius" class="slider-label">Scatter Radius (Spread)</label>
+              <span id="val-radius" class="slider-value">18 px</span>
+            </div>
+            <input type="range" id="slider-radius" class="range-slider" min="2" max="60" step="1" value="18" data-param="radius" data-unit=" px" />
+          </div>
+
+          <!-- Highlight Threshold -->
+          <div class="slider-group" id="group-threshold">
+            <div class="slider-header">
+              <label for="slider-threshold" class="slider-label">Highlight Threshold</label>
+              <span id="val-threshold" class="slider-value">80%</span>
+            </div>
+            <input type="range" id="slider-threshold" class="range-slider" min="20" max="98" step="1" value="80" data-param="threshold" data-unit="%" />
+          </div>
+
+          <!-- Threshold Softness / Knee -->
+          <div class="slider-group" id="group-softness">
+            <div class="slider-header">
+              <label for="slider-softness" class="slider-label">Highlight Knee (Rolloff)</label>
+              <span id="val-softness" class="slider-value">32%</span>
+            </div>
+            <input type="range" id="slider-softness" class="range-slider" min="5" max="100" step="1" value="32" data-param="softness" data-unit="%" />
+          </div>
+
+          <!-- Spectral Color Warmth -->
+          <div class="slider-group" id="group-warmth">
+            <div class="slider-header">
+              <label for="slider-warmth" class="slider-label">Spectral Tint (Crimson ↔ Amber)</label>
+              <span id="val-warmth" class="slider-value">40%</span>
+            </div>
+            <input type="range" id="slider-warmth" class="range-slider spectral-track" min="0" max="100" step="1" value="40" data-param="warmth" data-unit="%" />
+          </div>
+
+          <!-- Red Emulsion Sensitivity -->
+          <div class="slider-group" id="group-redSensitivity">
+            <div class="slider-header">
+              <label for="slider-redSensitivity" class="slider-label">Red Layer Sensitivity</label>
+              <span id="val-redSensitivity" class="slider-value">55%</span>
+            </div>
+            <input type="range" id="slider-redSensitivity" class="range-slider" min="0" max="100" step="1" value="55" data-param="redSensitivity" data-unit="%" />
+          </div>
+        </section>
+
+        <!-- Section 2: Slide Toggles & Secondary Optical Controls -->
+        <section class="control-section" data-mobile-tab="toggles" aria-labelledby="heading-slide-toggles">
+          <div class="section-header">
+            <h2 id="heading-slide-toggles" class="section-title">
+              <span class="section-dot"></span>
+              Optical Slide Toggles
+            </h2>
+          </div>
+
+          <div class="toggle-list">
+            <!-- Master Enable Toggle -->
+            <label class="slide-toggle-row" for="toggle-enabled">
+              <div class="toggle-info">
+                <span class="toggle-title">Enable Halation Pipeline</span>
+                <span class="toggle-desc">Master optical bypass switch</span>
+              </div>
+              <input type="checkbox" id="toggle-enabled" class="switch-input" data-toggle="enabled" checked />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+
+            <!-- Point-Source Boost Toggle -->
+            <label class="slide-toggle-row" for="toggle-pointBoostEnabled">
+              <div class="toggle-info">
+                <span class="toggle-title">Point-Light Micro Boost</span>
+                <span class="toggle-desc">Amplifies small beacons, LEDs &amp; distant lamps</span>
+              </div>
+              <input type="checkbox" id="toggle-pointBoostEnabled" class="switch-input" data-toggle="pointBoostEnabled" checked />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+
+            <!-- Point-Source Boost Slider -->
+            <div class="slider-group" id="group-pointBoost" style="padding: 2px 4px 6px;">
+              <div class="slider-header">
+                <label for="slider-pointBoost" class="slider-label">Point-Source Gain</label>
+                <span id="val-pointBoost" class="slider-value">115%</span>
+              </div>
+              <input type="range" id="slider-pointBoost" class="range-slider" min="0" max="200" step="1" value="115" data-param="pointBoost" data-unit="%" />
+            </div>
+
+            <!-- Dual-Layer Emulsion Toggle -->
+            <label class="slide-toggle-row" for="toggle-dualLayerEnabled">
+              <div class="toggle-info">
+                <span class="toggle-title">Dual-Layer Film Emulsion</span>
+                <span class="toggle-desc">Amber inner core + deep crimson outer scatter</span>
+              </div>
+              <input type="checkbox" id="toggle-dualLayerEnabled" class="switch-input" data-toggle="dualLayerEnabled" checked />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+
+            <!-- Shadow / Edge Gating Toggle -->
+            <label class="slide-toggle-row" for="toggle-edgeGateEnabled">
+              <div class="toggle-info">
+                <span class="toggle-title">Shadow &amp; Edge Gating</span>
+                <span class="toggle-desc">Confines halation to dark contrast boundaries</span>
+              </div>
+              <input type="checkbox" id="toggle-edgeGateEnabled" class="switch-input" data-toggle="edgeGateEnabled" checked />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+
+            <!-- Shadow / Edge Gating Slider -->
+            <div class="slider-group" id="group-edgeGate" style="padding: 2px 4px 6px;">
+              <div class="slider-header">
+                <label for="slider-edgeGate" class="slider-label">Shadow Contrast Gate</label>
+                <span id="val-edgeGate" class="slider-value">72%</span>
+              </div>
+              <input type="range" id="slider-edgeGate" class="range-slider" min="0" max="100" step="1" value="72" data-param="edgeGate" data-unit="%" />
+            </div>
+
+            <!-- Highlight Core Bloom Toggle -->
+            <label class="slide-toggle-row" for="toggle-bloomEnabled">
+              <div class="toggle-info">
+                <span class="toggle-title">Highlight Core Pro-Mist</span>
+                <span class="toggle-desc">Soft atmospheric diffusion on bright cores</span>
+              </div>
+              <input type="checkbox" id="toggle-bloomEnabled" class="switch-input" data-toggle="bloomEnabled" checked />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+
+            <!-- Bloom Slider -->
+            <div class="slider-group" id="group-bloom" style="padding: 2px 4px 6px;">
+              <div class="slider-header">
+                <label for="slider-bloom" class="slider-label">Core Mist Diffusion</label>
+                <span id="val-bloom" class="slider-value">18%</span>
+              </div>
+              <input type="range" id="slider-bloom" class="range-slider" min="0" max="100" step="1" value="18" data-param="bloom" data-unit="%" />
+            </div>
+
+            <!-- 35mm Film Grain Toggle -->
+            <label class="slide-toggle-row" for="toggle-grainEnabled">
+              <div class="toggle-info">
+                <span class="toggle-title">35mm Analog Film Grain</span>
+                <span class="toggle-desc">Midtone-weighted organic silver halide grain</span>
+              </div>
+              <input type="checkbox" id="toggle-grainEnabled" class="switch-input" data-toggle="grainEnabled" />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+
+            <!-- Grain Slider -->
+            <div class="slider-group disabled" id="group-grain" style="padding: 2px 4px 6px;">
+              <div class="slider-header">
+                <label for="slider-grain" class="slider-label">Film Grain Amount</label>
+                <span id="val-grain" class="slider-value">0%</span>
+              </div>
+              <input type="range" id="slider-grain" class="range-slider" min="0" max="100" step="1" value="0" data-param="grain" data-unit="%" />
+            </div>
+
+            <!-- Solo Halation Map Toggle -->
+            <label class="slide-toggle-row" for="toggle-soloHalation">
+              <div class="toggle-info">
+                <span class="toggle-title">Solo Halation Map View</span>
+                <span class="toggle-desc">Preview isolated emulsion scatter on black</span>
+              </div>
+              <input type="checkbox" id="toggle-soloHalation" class="switch-input" data-toggle="soloHalation" />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
+          </div>
+        </section>
+
+        <!-- Section 3: Film Stock Presets -->
+        <section class="control-section" data-mobile-tab="presets" aria-labelledby="heading-presets">
+          <div class="section-header">
+            <h2 id="heading-presets" class="section-title">
+              <span class="section-dot"></span>
+              Film Stock Profiles
+            </h2>
+          </div>
+
+          <div id="preset-grid" class="preset-grid">
+            <!-- Populated dynamically from PRESETS -->
+          </div>
+        </section>
+      </div>
+
+      <!-- Lossless Export Footer -->
+      <footer class="export-dock">
+        <div class="export-meta-row">
+          <div class="format-selector" role="radiogroup" aria-label="Export File Format">
+            <button type="button" class="format-option active" data-format="image/png" data-ext="png" title="100% uncompressed lossless PNG">PNG (Lossless)</button>
+            <button type="button" class="format-option" data-format="image/jpeg" data-ext="jpg" title="Maximum quality 100% JPEG">JPEG (100%)</button>
+            <button type="button" class="format-option" data-format="image/webp" data-ext="webp" title="Maximum quality 100% WebP">WebP (100%)</button>
+          </div>
+          <span id="export-res-label" class="export-dimensions">667 × 1000 px</span>
+        </div>
+
+        <button type="button" id="export-btn" class="btn btn-primary btn-export-full">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          <span id="export-btn-label">Download Full-Resolution PNG</span>
+        </button>
+      </footer>
+    </aside>
+  </main>
+
+  <div id="toast-banner" class="toast-banner" role="status" aria-live="polite"></div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
