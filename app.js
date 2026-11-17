@@ -862,6 +862,9 @@ export class HalationStudioApp {
   }
 
   requestRender() {
+    if (this.badgeRight && !this.isHoldingOriginal) {
+      this.badgeRight.textContent = this.params.soloHalation ? 'Solo Halation Map' : 'Halation Studio';
+    }
     if (this._rafId) cancelAnimationFrame(this._rafId);
     this._rafId = requestAnimationFrame(() => {
       this.engine.render(this.params);

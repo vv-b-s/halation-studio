@@ -76,7 +76,7 @@ async function launchHeadlessBrowser(initialUrl) {
       '--disable-gpu',
       '--remote-debugging-port=0',
       `--user-data-dir=${userDataDir}`,
-      'about:blank',
+      initialUrl,
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] }
   );
@@ -135,7 +135,8 @@ async function launchHeadlessBrowser(initialUrl) {
   ws.addEventListener('message', (event) => {
     const msg = JSON.parse(event.data);
     if (msg.id && pending.has(msg.id)) {
-      const { resolve, reject } = pending.get(msg.id);
+      const { resolve, reject, timer } = pending.get(msg.id);
+      clearTimeout(timer);
       pending.delete(msg.id);
       if (msg.error) reject(new Error(msg.error.message || JSON.stringify(msg.error)));
       else resolve(msg.result);
@@ -145,7 +146,11 @@ async function launchHeadlessBrowser(initialUrl) {
   const sendCommand = (method, params = {}) =>
     new Promise((resolve, reject) => {
       const id = nextId++;
-      pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`CDP command timed out: ${method}`));
+      }, 25000);
+      pending.set(id, { resolve, reject, timer });
       ws.send(JSON.stringify({ id, method, params }));
     });
 
@@ -156,8 +161,6 @@ async function launchHeadlessBrowser(initialUrl) {
     callCount: true,
     detailed: true,
   });
-
-  await sendCommand('Page.navigate', { url: initialUrl });
 
   const evaluate = async (expression) => {
     const res = await sendCommand('Runtime.evaluate', {
@@ -397,7 +400,7 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
         const soloToggle = document.getElementById('toggle-soloHalation');
         soloToggle.checked = true;
         soloToggle.dispatchEvent(new Event('change', { bubbles: true }));
-        await new Promise(r => requestAnimationFrame(r));
+        app.engine.render(app.params);
         const soloBadgeText = document.getElementById('split-badge-right').textContent;
         soloToggle.checked = false;
         soloToggle.dispatchEvent(new Event('change', { bubbles: true }));
