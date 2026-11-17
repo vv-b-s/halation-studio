@@ -1,7 +1,9 @@
-name: Deploy Halation Optical Studio to GitHub Pages
+name: Test & Deploy Halation Optical Studio to GitHub Pages
 
 on:
   push:
+    branches: ["main", "master"]
+  pull_request:
     branches: ["main", "master"]
   workflow_dispatch:
 
@@ -15,7 +17,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    name: Automated Metadata & Headless Browser UI Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run Unit & End-to-End UI Tests
+        run: npm test
+
   deploy:
+    name: Deploy to GitHub Pages
+    needs: test
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

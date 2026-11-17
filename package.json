@@ -1,0 +1,11 @@
+{
+  "name": "halation-studio",
+  "version": "1.1.0",
+  "description": "35mm Remjet-Free Optical Film Halation Studio with Lossless Metadata-Preserving Export",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/metadata.test.js tests/ui.test.js",
+    "test:unit": "node --test tests/metadata.test.js",
+    "test:ui": "node --test tests/ui.test.js"
+  }
+}

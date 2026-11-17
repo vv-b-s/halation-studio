@@ -336,6 +336,16 @@
               <input type="checkbox" id="toggle-soloHalation" class="switch-input" data-toggle="soloHalation" />
               <span class="switch-track"><span class="switch-thumb"></span></span>
             </label>
+
+            <!-- Strip Image Metadata Toggle -->
+            <label class="slide-toggle-row" for="toggle-stripMetadata">
+              <div class="toggle-info">
+                <span class="toggle-title">Strip Image Metadata</span>
+                <span class="toggle-desc">Remove EXIF, XMP, ICC &amp; camera tags on export</span>
+              </div>
+              <input type="checkbox" id="toggle-stripMetadata" class="switch-input" data-toggle="stripMetadata" />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+            </label>
           </div>
         </section>
 
@@ -363,6 +373,11 @@
             <button type="button" class="format-option" data-format="image/webp" data-ext="webp" title="Maximum quality 100% WebP">WebP (100%)</button>
           </div>
           <span id="export-res-label" class="export-dimensions">667 × 1000 px</span>
+        </div>
+
+        <div class="export-metadata-bar" id="export-metadata-bar">
+          <span id="metadata-status-badge" class="metadata-badge preserved">Metadata Preserved</span>
+          <span id="export-filename-preview" class="export-filename-preview" title="Exact export filename">example1-input.png</span>
         </div>
 
         <button type="button" id="export-btn" class="btn btn-primary btn-export-full">

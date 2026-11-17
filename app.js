@@ -1,28 +1,46 @@
 import { HalationEngine, DEFAULT_PARAMS, PRESETS } from './halation-engine.js';
+import {
+  extractImageMetadata,
+  processExportBlobMetadata,
+  getExactExportFilename,
+} from './metadata-utils.js';
+import {
+  saveUploadedImageToCache,
+  loadUploadedImageFromCache,
+  saveStudioStateToCache,
+  loadStudioStateFromCache,
+} from './session-cache.js';
 
 const BUILTIN_SAMPLES = {
   example1: {
     id: 'example1',
     title: 'Example 1: Night Kiosk',
-    filename: 'night-kiosk',
+    filename: 'example1-input.png',
     inputUrl: './assets/examples/example1-input.png',
     expectedUrl: './assets/examples/example1-expected.png',
   },
   example2: {
     id: 'example2',
     title: 'Example 2: Streetlamp',
-    filename: 'cobblestone-streetlamp',
+    filename: 'example2-input.png',
     inputUrl: './assets/examples/example2-input.png',
     expectedUrl: './assets/examples/example2-expected.png',
   },
 };
 
-class HalationStudioApp {
+export class HalationStudioApp {
   constructor() {
     this.params = { ...DEFAULT_PARAMS };
     this.activePresetKey = 'reference800T';
     this.currentSampleKey = 'example1';
-    this.currentFilename = 'night-kiosk';
+    this.currentFilename = 'example1-input';
+    this.originalFileName = 'example1-input.png';
+    this.originalMime = 'image/png';
+    this.currentMetadata = null;
+
+    // Last exported artifact references (used by UI & automated tests)
+    this.lastExportedBlob = null;
+    this.lastExportedFilename = null;
 
     // Full-resolution source image (never downscaled for export)
     this.fullResImage = null;
@@ -62,8 +80,90 @@ class HalationStudioApp {
     this._bindFileUploadAndDrop();
     this._bindMobileTabs();
 
-    // Load Example 1 on startup
-    this.loadBuiltinSample('example1');
+    // Restore cached session / uploaded image or fall back to Example 1
+    this.readyPromise = this._restoreSessionOrDefault();
+  }
+
+  async _restoreSessionOrDefault() {
+    try {
+      const [savedState, cachedImage] = await Promise.all([
+        loadStudioStateFromCache(),
+        loadUploadedImageFromCache(),
+      ]);
+
+      // If a cached uploaded image exists, populate the custom photo chip so user can switch to it anytime
+      if (cachedImage && cachedImage.name) {
+        this._cachedCustomImage = cachedImage;
+        const customChip = document.getElementById('custom-photo-chip');
+        if (customChip) {
+          customChip.style.display = 'inline-flex';
+          document.getElementById('custom-photo-name').textContent =
+            cachedImage.name.length > 20
+              ? cachedImage.name.slice(0, 18) + '…'
+              : cachedImage.name;
+        }
+      }
+
+      if (savedState) {
+        if (savedState.params && typeof savedState.params === 'object') {
+          this.params = { ...DEFAULT_PARAMS, ...savedState.params };
+        }
+        this.activePresetKey =
+          savedState.activePresetKey !== undefined
+            ? savedState.activePresetKey
+            : 'reference800T';
+        if (savedState.exportMime && savedState.exportExt) {
+          this.exportMime = savedState.exportMime;
+          this.exportExt = savedState.exportExt;
+        }
+        if (typeof savedState.splitPercent === 'number') {
+          this.splitPercent = savedState.splitPercent;
+        }
+        if (savedState.viewMode) {
+          this.viewMode = savedState.viewMode;
+        }
+
+        this._syncControlsFromParams();
+        this._syncPresetHighlight();
+        this._syncExportFormatUI();
+
+        if (savedState.currentSampleKey === 'custom' && cachedImage?.file) {
+          await this.loadUserFile(cachedImage.file, {
+            fromCache: true,
+            preserveExportFormat: true,
+            preserveViewMode: true,
+          });
+          return;
+        }
+
+        const sampleKey = BUILTIN_SAMPLES[savedState.currentSampleKey]
+          ? savedState.currentSampleKey
+          : 'example1';
+        await this.loadBuiltinSample(sampleKey, {
+          skipPersist: true,
+          preserveViewMode: true,
+        });
+        return;
+      }
+    } catch (err) {
+      console.warn('Session cache restore skipped:', err);
+    }
+
+    await this.loadBuiltinSample('example1', { skipPersist: true });
+  }
+
+  async _persistState() {
+    await saveStudioStateToCache({
+      params: { ...this.params },
+      activePresetKey: this.activePresetKey,
+      currentSampleKey: this.currentSampleKey,
+      viewMode: this.viewMode,
+      splitPercent: this.splitPercent,
+      exportMime: this.exportMime,
+      exportExt: this.exportExt,
+      originalFileName: this.originalFileName,
+      originalMime: this.originalMime,
+    });
   }
 
   _initPresetsUI() {
@@ -87,19 +187,25 @@ class HalationStudioApp {
     }
   }
 
-  applyPreset(presetKey) {
+  _syncPresetHighlight() {
+    document.querySelectorAll('.preset-card').forEach((card) => {
+      card.classList.toggle('active', card.dataset.preset === this.activePresetKey);
+    });
+  }
+
+  applyPreset(presetKey, { resetMetadataToggle = false } = {}) {
     const preset = PRESETS[presetKey];
     if (!preset) return;
 
     this.activePresetKey = presetKey;
-    this.params = { ...preset.params };
+    const keepStrip = resetMetadataToggle ? false : Boolean(this.params.stripMetadata);
+    this.params = { ...DEFAULT_PARAMS, ...preset.params, stripMetadata: keepStrip };
 
-    document.querySelectorAll('.preset-card').forEach((card) => {
-      card.classList.toggle('active', card.dataset.preset === presetKey);
-    });
-
+    this._syncPresetHighlight();
     this._syncControlsFromParams();
+    this._updateMetadataStatusUI();
     this.requestRender();
+    this._persistState();
     this.showToast(`Applied "${preset.name}" profile`);
   }
 
@@ -125,6 +231,7 @@ class HalationStudioApp {
 
     // Update dependent slider enabled/disabled states
     this._updateDependentGroups();
+    this._updateMetadataStatusUI();
   }
 
   _updateSliderVisual(slider, val, unit) {
@@ -160,6 +267,54 @@ class HalationStudioApp {
     }
   }
 
+  _syncExportFormatUI() {
+    document.querySelectorAll('.format-option').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.format === this.exportMime);
+    });
+    const fmtName = this.exportExt.toUpperCase();
+    const qualityNote = this.exportExt === 'png' ? 'Lossless PNG' : `Max-Quality ${fmtName}`;
+    const labelEl = document.getElementById('export-btn-label');
+    if (labelEl) {
+      labelEl.textContent = `Download Full-Resolution ${qualityNote}`;
+    }
+    this._updateMetadataStatusUI();
+  }
+
+  _setExportFormat(mime, ext) {
+    this.exportMime = mime;
+    this.exportExt = ext;
+    this._syncExportFormatUI();
+  }
+
+  _updateMetadataStatusUI() {
+    const badge = document.getElementById('metadata-status-badge');
+    const filePreview = document.getElementById('export-filename-preview');
+    const outName = getExactExportFilename(
+      this.originalFileName,
+      this.originalMime,
+      this.exportMime,
+      this.exportExt
+    );
+
+    if (filePreview) {
+      filePreview.textContent = outName;
+      filePreview.title = `Export filename: ${outName}`;
+    }
+
+    if (!badge) return;
+
+    if (this.params.stripMetadata) {
+      badge.textContent = 'Metadata Stripped';
+      badge.className = 'metadata-badge stripped';
+    } else {
+      const tags = this.currentMetadata?.tagsSummary?.length
+        ? ` (${this.currentMetadata.tagsSummary.join('•')})`
+        : '';
+      badge.textContent = `Metadata Preserved${tags}`;
+      badge.className = 'metadata-badge preserved';
+    }
+  }
+
   _bindControls() {
     // Range sliders
     document.querySelectorAll('.range-slider[data-param]').forEach((slider) => {
@@ -174,6 +329,7 @@ class HalationStudioApp {
         this._updateSliderVisual(slider, val, unit);
         this._clearActivePresetHighlight();
         this.requestRender();
+        this._persistState();
       });
 
       // Double-click any slider to reset it to its default value
@@ -183,6 +339,7 @@ class HalationStudioApp {
         slider.value = defVal;
         this._updateSliderVisual(slider, defVal, unit);
         this.requestRender();
+        this._persistState();
       });
     });
 
@@ -192,7 +349,17 @@ class HalationStudioApp {
       toggle.addEventListener('change', () => {
         this.params[key] = toggle.checked;
         this._updateDependentGroups();
-        this.requestRender();
+        this._updateMetadataStatusUI();
+        if (key !== 'stripMetadata') {
+          this.requestRender();
+        } else {
+          this.showToast(
+            toggle.checked
+              ? 'Metadata will be stripped on export'
+              : 'Original image metadata & title will be preserved on export'
+          );
+        }
+        this._persistState();
       });
     });
 
@@ -203,6 +370,17 @@ class HalationStudioApp {
     document.getElementById('sample-btn-2').addEventListener('click', () => {
       this.loadBuiltinSample('example2');
     });
+
+    const customChip = document.getElementById('custom-photo-chip');
+    if (customChip) {
+      customChip.addEventListener('click', async () => {
+        if (this.currentSampleKey === 'custom') return;
+        const cached = this._cachedCustomImage || (await loadUploadedImageFromCache());
+        if (cached && cached.file) {
+          await this.loadUserFile(cached.file, { fromCache: true });
+        }
+      });
+    }
 
     // Comparison View Mode Buttons
     document.querySelectorAll('.compare-mode-group .mode-btn').forEach((btn) => {
@@ -248,21 +426,15 @@ class HalationStudioApp {
 
     // Reset All Button
     document.getElementById('reset-all-btn').addEventListener('click', () => {
-      this.applyPreset('reference800T');
+      this.applyPreset('reference800T', { resetMetadataToggle: true });
       this.resetZoom();
     });
 
     // Export Format Selector
     document.querySelectorAll('.format-option').forEach((btn) => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('.format-option').forEach((b) => b.classList.remove('active'));
-        btn.classList.add('active');
-        this.exportMime = btn.dataset.format;
-        this.exportExt = btn.dataset.ext;
-
-        const fmtName = this.exportExt.toUpperCase();
-        const qualityNote = this.exportExt === 'png' ? 'Lossless PNG' : `Max-Quality ${fmtName}`;
-        document.getElementById('export-btn-label').textContent = `Download Full-Resolution ${qualityNote}`;
+        this._setExportFormat(btn.dataset.format, btn.dataset.ext);
+        this._persistState();
       });
     });
 
@@ -273,7 +445,7 @@ class HalationStudioApp {
 
   _clearActivePresetHighlight() {
     this.activePresetKey = null;
-    document.querySelectorAll('.preset-card').forEach((card) => card.classList.remove('active'));
+    this._syncPresetHighlight();
   }
 
   setViewMode(mode) {
@@ -288,6 +460,7 @@ class HalationStudioApp {
     });
 
     this._updateComparisonOverlay();
+    this._persistState();
   }
 
   _updateComparisonOverlay() {
@@ -361,10 +534,16 @@ class HalationStudioApp {
     );
 
     window.addEventListener('mouseup', () => {
-      draggingSplit = false;
+      if (draggingSplit) {
+        draggingSplit = false;
+        this._persistState();
+      }
     });
     window.addEventListener('touchend', () => {
-      draggingSplit = false;
+      if (draggingSplit) {
+        draggingSplit = false;
+        this._persistState();
+      }
     });
 
     // Keyboard accessibility on split handle
@@ -372,9 +551,11 @@ class HalationStudioApp {
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
         this._applySplitPosition(this.splitPercent - 3);
+        this._persistState();
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
         this._applySplitPosition(this.splitPercent + 3);
+        this._persistState();
       }
     });
   }
@@ -504,30 +685,94 @@ class HalationStudioApp {
     });
   }
 
-  async loadBuiltinSample(sampleKey) {
+  async loadBuiltinSample(sampleKey, { skipPersist = false, preserveViewMode = false } = {}) {
     const sample = BUILTIN_SAMPLES[sampleKey];
     if (!sample) return;
 
     this.currentSampleKey = sampleKey;
-    this.currentFilename = sample.filename;
+    this.currentFilename = sample.filename.replace(/\.[^/.]+$/, '');
+    this.originalFileName = sample.filename;
+    this.originalMime = 'image/png';
     this.expectedRefUrl = sample.expectedUrl;
     this.inputDataUrl = sample.inputUrl;
 
     document.getElementById('sample-btn-1').classList.toggle('active', sampleKey === 'example1');
     document.getElementById('sample-btn-2').classList.toggle('active', sampleKey === 'example2');
-    document.getElementById('custom-photo-chip').style.display = 'none';
+
+    const customChip = document.getElementById('custom-photo-chip');
+    if (customChip) {
+      customChip.classList.remove('active');
+      if (!this._cachedCustomImage) {
+        customChip.style.display = 'none';
+      }
+    }
+
     document.getElementById('view-mode-ref').style.display = '';
 
+    // Extract metadata from the built-in sample file if available
+    try {
+      const resp = await fetch(sample.inputUrl);
+      if (resp.ok) {
+        const buf = await resp.arrayBuffer();
+        this.currentMetadata = extractImageMetadata(
+          new Uint8Array(buf),
+          'image/png',
+          sample.filename
+        );
+      }
+    } catch (_) {
+      this.currentMetadata = extractImageMetadata(new Uint8Array(0), 'image/png', sample.filename);
+    }
+
+    if (preserveViewMode) {
+      document.querySelectorAll('.compare-mode-group .mode-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.mode === this.viewMode);
+      });
+    }
+
+    this._updateMetadataStatusUI();
     await this._setImageFromUrl(sample.inputUrl);
+
+    if (!skipPersist) {
+      await this._persistState();
+    }
   }
 
-  async loadUserFile(file) {
-    const objectUrl = URL.createObjectURL(file);
-    const cleanName = file.name.replace(/\.[^/.]+$/, '') || 'photo';
+  async loadUserFile(
+    file,
+    { fromCache = false, preserveExportFormat = false, preserveViewMode = false } = {}
+  ) {
+    const rawBytes = new Uint8Array(await file.arrayBuffer());
+    const metadata = extractImageMetadata(rawBytes, file.type, file.name);
+    const detectedMime =
+      metadata.format !== 'unknown' ? metadata.format : file.type || 'image/png';
 
+    this.currentMetadata = metadata;
+    this.originalFileName = file.name || 'photo.png';
+    this.originalMime = detectedMime;
+
+    const cleanName = this.originalFileName.replace(/\.[^/.]+$/, '') || 'photo';
     this.currentSampleKey = 'custom';
     this.currentFilename = cleanName;
     this.expectedRefUrl = null;
+
+    // Auto-select matching export format so export preserves exact upload format & filename by default
+    if (!preserveExportFormat) {
+      if (detectedMime === 'image/jpeg') {
+        this._setExportFormat('image/jpeg', 'jpg');
+      } else if (detectedMime === 'image/webp') {
+        this._setExportFormat('image/webp', 'webp');
+      } else {
+        this._setExportFormat('image/png', 'png');
+      }
+    }
+
+    const blob = new Blob([rawBytes], { type: detectedMime });
+    if (this._customObjectUrl) {
+      URL.revokeObjectURL(this._customObjectUrl);
+    }
+    const objectUrl = URL.createObjectURL(blob);
+    this._customObjectUrl = objectUrl;
     this.inputDataUrl = objectUrl;
 
     document.getElementById('sample-btn-1').classList.remove('active');
@@ -537,19 +782,46 @@ class HalationStudioApp {
     customChip.style.display = 'inline-flex';
     customChip.classList.add('active');
     document.getElementById('custom-photo-name').textContent =
-      file.name.length > 20 ? file.name.slice(0, 18) + '…' : file.name;
+      this.originalFileName.length > 20
+        ? this.originalFileName.slice(0, 18) + '…'
+        : this.originalFileName;
 
     // Hide "Split vs Expected" when user loads their own photo
     document.getElementById('view-mode-ref').style.display = 'none';
-    if (this.viewMode === 'split-expected') {
-      this.viewMode = 'split-input';
+    if (this.viewMode === 'split-expected' || !preserveViewMode) {
+      if (this.viewMode === 'split-expected') {
+        this.viewMode = 'split-input';
+      }
       document.querySelectorAll('.compare-mode-group .mode-btn').forEach((btn) => {
-        btn.classList.toggle('active', btn.dataset.mode === 'split-input');
+        btn.classList.toggle('active', btn.dataset.mode === this.viewMode);
       });
     }
 
+    this._cachedCustomImage = {
+      name: this.originalFileName,
+      type: detectedMime,
+      lastModified: file.lastModified || Date.now(),
+      bytes: rawBytes,
+      file: new File([rawBytes], this.originalFileName, {
+        type: detectedMime,
+        lastModified: file.lastModified || Date.now(),
+      }),
+    };
+
+    if (!fromCache) {
+      await saveUploadedImageToCache(file, rawBytes);
+    }
+
+    this._updateMetadataStatusUI();
     await this._setImageFromUrl(objectUrl);
-    this.showToast(`Loaded "${file.name}" (${this.fullResImage.naturalWidth} × ${this.fullResImage.naturalHeight} px)`);
+    await this._persistState();
+
+    const metaNote = metadata.tagsSummary.length
+      ? ` • ${metadata.tagsSummary.join('+')} metadata detected`
+      : '';
+    this.showToast(
+      `${fromCache ? 'Restored' : 'Loaded'} "${this.originalFileName}" (${this.fullResImage.naturalWidth} × ${this.fullResImage.naturalHeight} px${metaNote})`
+    );
   }
 
   async _setImageFromUrl(url) {
@@ -598,7 +870,7 @@ class HalationStudioApp {
   }
 
   async exportPhoto() {
-    if (!this.fullResImage) return;
+    if (!this.fullResImage) return null;
 
     const exportBtn = document.getElementById('export-btn');
     const labelSpan = document.getElementById('export-btn-label');
@@ -608,15 +880,31 @@ class HalationStudioApp {
       exportBtn.disabled = true;
       labelSpan.textContent = `Rendering Native ${this.fullResImage.naturalWidth}×${this.fullResImage.naturalHeight}…`;
 
-      const blob = await this.engine.exportFullResolution(
+      const rawBlob = await this.engine.exportFullResolution(
         this.fullResImage,
         this.params,
         this.exportMime,
         1.0
       );
 
-      const outFilename = `${this.currentFilename}-halation.${this.exportExt}`;
-      const url = URL.createObjectURL(blob);
+      const stripMeta = Boolean(this.params.stripMetadata);
+      const finalBlob = await processExportBlobMetadata(
+        rawBlob,
+        this.currentMetadata,
+        stripMeta
+      );
+
+      const outFilename = getExactExportFilename(
+        this.originalFileName,
+        this.originalMime,
+        this.exportMime,
+        this.exportExt
+      );
+
+      this.lastExportedBlob = finalBlob;
+      this.lastExportedFilename = outFilename;
+
+      const url = URL.createObjectURL(finalBlob);
       const a = document.createElement('a');
       a.href = url;
       a.download = outFilename;
@@ -625,11 +913,16 @@ class HalationStudioApp {
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
 
-      const sizeMB = (blob.size / (1024 * 1024)).toFixed(2);
-      this.showToast(`Exported ${outFilename} (${this.fullResImage.naturalWidth}×${this.fullResImage.naturalHeight} px, ${sizeMB} MB)`);
+      const sizeMB = (finalBlob.size / (1024 * 1024)).toFixed(2);
+      const metaStatus = stripMeta ? 'metadata stripped' : 'metadata preserved';
+      this.showToast(
+        `Exported ${outFilename} (${this.fullResImage.naturalWidth}×${this.fullResImage.naturalHeight} px, ${sizeMB} MB, ${metaStatus})`
+      );
+      return { blob: finalBlob, filename: outFilename };
     } catch (err) {
       console.error('Export failed:', err);
       this.showToast('Export error: ' + err.message);
+      return null;
     } finally {
       exportBtn.disabled = false;
       labelSpan.textContent = prevText;

@@ -30,6 +30,7 @@ export const DEFAULT_PARAMS = {
   edgeGateEnabled: true,
   bloomEnabled: true,
   grainEnabled: false,
+  stripMetadata: false,
 };
 
 export const PRESETS = {
