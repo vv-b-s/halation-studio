@@ -20,9 +20,14 @@ A responsive desktop and mobile web application that simulates authentic 35mm mo
 - **Zero-Quality-Loss Native Export**:
   - Renders and exports directly at the photo's original pixel dimensions (`naturalWidth × naturalHeight`) in **Lossless PNG**, **100% JPEG**, or **100% WebP**.
 
-## Running Automated UI & Metadata Tests
+## Running Automated Whole-Project Tests & Coverage
 
-The project includes automated unit tests ([`tests/metadata.test.js`](./tests/metadata.test.js)) and real headless Chromium/Chrome end-to-end UI tests ([`tests/ui.test.js`](./tests/ui.test.js)) that verify all sliders, slide toggles, presets, metadata preservation/stripping, exact upload filename/title export, and accidental page refresh caching:
+The project includes comprehensive unit and end-to-end headless Chromium tests covering the entire codebase (`halation-engine.js`, `app.js`, `metadata-utils.js`, `session-cache.js`, `index.html`, and `styles.css`) with Node.js and Browser V8 code coverage enforcement:
+
+- [`tests/engine.test.js`](./tests/engine.test.js): Tests `DEFAULT_PARAMS`, all 5 `PRESETS`, `HalationEngine` WebGL multi-pass rendering (extract + 4-octave separable Gaussian blur + composite), FBO allocation/resizing, `maxTexSize` clamping, `exportFullResolution`, `destroy()`, and Canvas2D fallback when WebGL or shader compilation fails.
+- [`tests/cache.test.js`](./tests/cache.test.js): Tests `session-cache.js` uploaded photo and studio state persistence across both primary `IndexedDB` storage and `localStorage` fallback.
+- [`tests/metadata.test.js`](./tests/metadata.test.js): Tests `metadata-utils.js` lossless metadata extraction and injection across JPEG (`APP1` EXIF, `APP1` XMP, `APP2` ICC, `APP13` IPTC, `COM`), PNG (`eXIf`, `tEXt`, `iTXt`, `pHYs`, `tIME`), and WebP (`VP8`, `VP8L`, `VP8X`, `EXIF`, `XMP `, `ICCP`), cross-format conversions, and Little/Big-Endian TIFF EXIF titles.
+- [`tests/ui.test.js`](./tests/ui.test.js): Full headless Chromium E2E test suite verifying UI layout, optical engine accuracy against reference targets, all 10 sliders, all 8 slide toggles, all 5 presets, reset button, Hold Original (mouse/touch/keyboard), Split Curtain (mouse/touch/keyboard), zoom/pan, mobile tabs, drag-and-drop/paste/file-input uploads, >2048px native export, metadata preservation/stripping, accidental page refresh recovery, and whole-project Browser V8 line coverage (`>= 88%` overall).
 
 ```bash
 npm test
