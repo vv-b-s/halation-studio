@@ -60,6 +60,11 @@ export class HalationStudioApp {
     // Export format state
     this.exportMime = 'image/png';
     this.exportExt = 'png';
+    this.userSelectedFormat = false;
+
+    // Async load sequencing so background sample fetches never overwrite a user upload
+    this._loadSeq = 0;
+    this._activeLoadPromise = null;
 
     // DOM elements
     this.canvas = document.getElementById('render-canvas');
@@ -91,6 +96,9 @@ export class HalationStudioApp {
         loadUploadedImageFromCache(),
       ]);
 
+      // If the user already initiated a file upload while cache was opening, do not overwrite it
+      if (this._loadSeq > 0) return;
+
       // If a cached uploaded image exists, populate the custom photo chip so user can switch to it anytime
       if (cachedImage && cachedImage.name) {
         this._cachedCustomImage = cachedImage;
@@ -116,6 +124,7 @@ export class HalationStudioApp {
           this.exportMime = savedState.exportMime;
           this.exportExt = savedState.exportExt;
         }
+        this.userSelectedFormat = Boolean(savedState.userSelectedFormat);
         if (typeof savedState.splitPercent === 'number') {
           this.splitPercent = savedState.splitPercent;
         }
@@ -130,7 +139,7 @@ export class HalationStudioApp {
         if (savedState.currentSampleKey === 'custom' && cachedImage?.file) {
           await this.loadUserFile(cachedImage.file, {
             fromCache: true,
-            preserveExportFormat: true,
+            preserveExportFormat: this.userSelectedFormat,
             preserveViewMode: true,
           });
           return;
@@ -145,11 +154,22 @@ export class HalationStudioApp {
         });
         return;
       }
+
+      if (cachedImage?.file) {
+        await this.loadUserFile(cachedImage.file, {
+          fromCache: true,
+          preserveExportFormat: false,
+          preserveViewMode: true,
+        });
+        return;
+      }
     } catch (err) {
       console.warn('Session cache restore skipped:', err);
     }
 
-    await this.loadBuiltinSample('example1', { skipPersist: true });
+    if (this._loadSeq === 0) {
+      await this.loadBuiltinSample('example1', { skipPersist: true });
+    }
   }
 
   async _persistState() {
@@ -161,6 +181,7 @@ export class HalationStudioApp {
       splitPercent: this.splitPercent,
       exportMime: this.exportMime,
       exportExt: this.exportExt,
+      userSelectedFormat: this.userSelectedFormat,
       originalFileName: this.originalFileName,
       originalMime: this.originalMime,
     });
@@ -651,13 +672,18 @@ export class HalationStudioApp {
       e.preventDefault();
       dropOverlay.classList.remove('visible');
       const file = e.dataTransfer?.files?.[0];
-      if (file && file.type.startsWith('image/')) {
+      if (file) {
         this.loadUserFile(file);
       }
     });
 
     // Clipboard Paste support
     window.addEventListener('paste', (e) => {
+      const directFile = e.clipboardData?.files?.[0];
+      if (directFile) {
+        this.loadUserFile(directFile);
+        return;
+      }
       const items = e.clipboardData?.items;
       if (!items) return;
       for (const item of items) {
@@ -689,142 +715,172 @@ export class HalationStudioApp {
     const sample = BUILTIN_SAMPLES[sampleKey];
     if (!sample) return;
 
-    this.currentSampleKey = sampleKey;
-    this.currentFilename = sample.filename.replace(/\.[^/.]+$/, '');
-    this.originalFileName = sample.filename;
-    this.originalMime = 'image/png';
-    this.expectedRefUrl = sample.expectedUrl;
-    this.inputDataUrl = sample.inputUrl;
+    const seq = ++this._loadSeq;
+    const task = (async () => {
+      this.currentSampleKey = sampleKey;
+      this.currentFilename = sample.filename.replace(/\.[^/.]+$/, '');
+      this.originalFileName = sample.filename;
+      this.originalMime = 'image/png';
+      this.expectedRefUrl = sample.expectedUrl;
+      this.inputDataUrl = sample.inputUrl;
 
-    document.getElementById('sample-btn-1').classList.toggle('active', sampleKey === 'example1');
-    document.getElementById('sample-btn-2').classList.toggle('active', sampleKey === 'example2');
+      document.getElementById('sample-btn-1').classList.toggle('active', sampleKey === 'example1');
+      document.getElementById('sample-btn-2').classList.toggle('active', sampleKey === 'example2');
 
-    const customChip = document.getElementById('custom-photo-chip');
-    if (customChip) {
-      customChip.classList.remove('active');
-      if (!this._cachedCustomImage) {
-        customChip.style.display = 'none';
+      const customChip = document.getElementById('custom-photo-chip');
+      if (customChip) {
+        customChip.classList.remove('active');
+        if (!this._cachedCustomImage) {
+          customChip.style.display = 'none';
+        }
       }
-    }
 
-    document.getElementById('view-mode-ref').style.display = '';
+      document.getElementById('view-mode-ref').style.display = '';
 
-    // Extract metadata from the built-in sample file if available
-    try {
-      const resp = await fetch(sample.inputUrl);
-      if (resp.ok) {
-        const buf = await resp.arrayBuffer();
-        this.currentMetadata = extractImageMetadata(
-          new Uint8Array(buf),
-          'image/png',
-          sample.filename
-        );
+      // Extract metadata from the built-in sample file if available
+      let sampleMetadata = extractImageMetadata(new Uint8Array(0), 'image/png', sample.filename);
+      try {
+        const resp = await fetch(sample.inputUrl);
+        if (resp.ok) {
+          const buf = await resp.arrayBuffer();
+          sampleMetadata = extractImageMetadata(
+            new Uint8Array(buf),
+            'image/png',
+            sample.filename
+          );
+        }
+      } catch (_) {}
+
+      // Abort if a newer load (such as a user photo upload) started while fetching the sample
+      if (seq !== this._loadSeq) return;
+
+      this.currentMetadata = sampleMetadata;
+
+      if (preserveViewMode) {
+        document.querySelectorAll('.compare-mode-group .mode-btn').forEach((btn) => {
+          btn.classList.toggle('active', btn.dataset.mode === this.viewMode);
+        });
       }
-    } catch (_) {
-      this.currentMetadata = extractImageMetadata(new Uint8Array(0), 'image/png', sample.filename);
-    }
 
-    if (preserveViewMode) {
-      document.querySelectorAll('.compare-mode-group .mode-btn').forEach((btn) => {
-        btn.classList.toggle('active', btn.dataset.mode === this.viewMode);
-      });
-    }
+      this._updateMetadataStatusUI();
+      await this._setImageFromUrl(sample.inputUrl, seq);
+      if (seq !== this._loadSeq) return;
 
-    this._updateMetadataStatusUI();
-    await this._setImageFromUrl(sample.inputUrl);
+      if (!skipPersist) {
+        await this._persistState();
+      }
+    })();
 
-    if (!skipPersist) {
-      await this._persistState();
-    }
+    this._activeLoadPromise = task;
+    return task;
   }
 
   async loadUserFile(
     file,
     { fromCache = false, preserveExportFormat = false, preserveViewMode = false } = {}
   ) {
-    const rawBytes = new Uint8Array(await file.arrayBuffer());
-    const metadata = extractImageMetadata(rawBytes, file.type, file.name);
-    const detectedMime =
-      metadata.format !== 'unknown' ? metadata.format : file.type || 'image/png';
+    const seq = ++this._loadSeq;
+    const rawFileName =
+      (file.name && file.name.trim().split(/[/\\]/).pop()?.trim()) || 'photo.png';
 
-    this.currentMetadata = metadata;
-    this.originalFileName = file.name || 'photo.png';
-    this.originalMime = detectedMime;
-
-    const cleanName = this.originalFileName.replace(/\.[^/.]+$/, '') || 'photo';
+    // Set filename and sample state synchronously before any await so export never sees stale state
+    this.originalFileName = rawFileName;
     this.currentSampleKey = 'custom';
-    this.currentFilename = cleanName;
+    this.currentFilename = rawFileName.replace(/\.[^/.]+$/, '') || 'photo';
     this.expectedRefUrl = null;
-
-    // Auto-select matching export format so export preserves exact upload format & filename by default
     if (!preserveExportFormat) {
-      if (detectedMime === 'image/jpeg') {
-        this._setExportFormat('image/jpeg', 'jpg');
-      } else if (detectedMime === 'image/webp') {
-        this._setExportFormat('image/webp', 'webp');
-      } else {
-        this._setExportFormat('image/png', 'png');
+      this.userSelectedFormat = false;
+    }
+
+    const task = (async () => {
+      const rawBytes = new Uint8Array(await file.arrayBuffer());
+      if (seq !== this._loadSeq) return;
+
+      const metadata = extractImageMetadata(rawBytes, file.type, rawFileName);
+      const detectedMime =
+        metadata.format !== 'unknown' ? metadata.format : file.type || 'image/png';
+
+      this.currentMetadata = metadata;
+      this.originalFileName = rawFileName;
+      this.originalMime = detectedMime;
+
+      // Auto-select matching export format so export preserves exact upload format & filename by default
+      if (!preserveExportFormat) {
+        const extMatch = rawFileName.match(/\.([^.]+)$/);
+        const origExtLower = extMatch ? extMatch[1].toLowerCase() : '';
+        if (detectedMime === 'image/jpeg') {
+          this._setExportFormat('image/jpeg', origExtLower === 'jpeg' ? 'jpeg' : 'jpg');
+        } else if (detectedMime === 'image/webp') {
+          this._setExportFormat('image/webp', 'webp');
+        } else {
+          this._setExportFormat('image/png', 'png');
+        }
       }
-    }
 
-    const blob = new Blob([rawBytes], { type: detectedMime });
-    if (this._customObjectUrl) {
-      URL.revokeObjectURL(this._customObjectUrl);
-    }
-    const objectUrl = URL.createObjectURL(blob);
-    this._customObjectUrl = objectUrl;
-    this.inputDataUrl = objectUrl;
-
-    document.getElementById('sample-btn-1').classList.remove('active');
-    document.getElementById('sample-btn-2').classList.remove('active');
-
-    const customChip = document.getElementById('custom-photo-chip');
-    customChip.style.display = 'inline-flex';
-    customChip.classList.add('active');
-    document.getElementById('custom-photo-name').textContent =
-      this.originalFileName.length > 20
-        ? this.originalFileName.slice(0, 18) + '…'
-        : this.originalFileName;
-
-    // Hide "Split vs Expected" when user loads their own photo
-    document.getElementById('view-mode-ref').style.display = 'none';
-    if (this.viewMode === 'split-expected' || !preserveViewMode) {
-      if (this.viewMode === 'split-expected') {
-        this.viewMode = 'split-input';
+      const blob = new Blob([rawBytes], { type: detectedMime });
+      if (this._customObjectUrl) {
+        URL.revokeObjectURL(this._customObjectUrl);
       }
-      document.querySelectorAll('.compare-mode-group .mode-btn').forEach((btn) => {
-        btn.classList.toggle('active', btn.dataset.mode === this.viewMode);
-      });
-    }
+      const objectUrl = URL.createObjectURL(blob);
+      this._customObjectUrl = objectUrl;
+      this.inputDataUrl = objectUrl;
 
-    this._cachedCustomImage = {
-      name: this.originalFileName,
-      type: detectedMime,
-      lastModified: file.lastModified || Date.now(),
-      bytes: rawBytes,
-      file: new File([rawBytes], this.originalFileName, {
+      document.getElementById('sample-btn-1').classList.remove('active');
+      document.getElementById('sample-btn-2').classList.remove('active');
+
+      const customChip = document.getElementById('custom-photo-chip');
+      customChip.style.display = 'inline-flex';
+      customChip.classList.add('active');
+      document.getElementById('custom-photo-name').textContent =
+        this.originalFileName.length > 20
+          ? this.originalFileName.slice(0, 18) + '…'
+          : this.originalFileName;
+
+      // Hide "Split vs Expected" when user loads their own photo
+      document.getElementById('view-mode-ref').style.display = 'none';
+      if (this.viewMode === 'split-expected' || !preserveViewMode) {
+        if (this.viewMode === 'split-expected') {
+          this.viewMode = 'split-input';
+        }
+        document.querySelectorAll('.compare-mode-group .mode-btn').forEach((btn) => {
+          btn.classList.toggle('active', btn.dataset.mode === this.viewMode);
+        });
+      }
+
+      this._cachedCustomImage = {
+        name: this.originalFileName,
         type: detectedMime,
         lastModified: file.lastModified || Date.now(),
-      }),
-    };
+        bytes: rawBytes,
+        file: new File([rawBytes], this.originalFileName, {
+          type: detectedMime,
+          lastModified: file.lastModified || Date.now(),
+        }),
+      };
 
-    if (!fromCache) {
-      await saveUploadedImageToCache(file, rawBytes);
-    }
+      // Update UI and decode fullResImage immediately before awaiting IndexedDB cache I/O
+      this._updateMetadataStatusUI();
+      await this._setImageFromUrl(objectUrl, seq);
+      if (seq !== this._loadSeq) return;
 
-    this._updateMetadataStatusUI();
-    await this._setImageFromUrl(objectUrl);
-    await this._persistState();
+      if (!fromCache) {
+        await saveUploadedImageToCache(file, rawBytes);
+      }
+      await this._persistState();
 
-    const metaNote = metadata.tagsSummary.length
-      ? ` • ${metadata.tagsSummary.join('+')} metadata detected`
-      : '';
-    this.showToast(
-      `${fromCache ? 'Restored' : 'Loaded'} "${this.originalFileName}" (${this.fullResImage.naturalWidth} × ${this.fullResImage.naturalHeight} px${metaNote})`
-    );
+      const metaNote = metadata.tagsSummary.length
+        ? ` • ${metadata.tagsSummary.join('+')} metadata detected`
+        : '';
+      this.showToast(
+        `${fromCache ? 'Restored' : 'Loaded'} "${this.originalFileName}" (${this.fullResImage.naturalWidth} × ${this.fullResImage.naturalHeight} px${metaNote})`
+      );
+    })();
+
+    this._activeLoadPromise = task;
+    return task;
   }
 
-  async _setImageFromUrl(url) {
+  async _setImageFromUrl(url, expectedSeq = this._loadSeq) {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     await new Promise((resolve, reject) => {
@@ -832,6 +888,8 @@ export class HalationStudioApp {
       img.onerror = reject;
       img.src = url;
     });
+
+    if (expectedSeq !== this._loadSeq) return;
 
     this.fullResImage = img;
     const natW = img.naturalWidth;
@@ -873,6 +931,11 @@ export class HalationStudioApp {
   }
 
   async exportPhoto() {
+    if (this._activeLoadPromise) {
+      try {
+        await this._activeLoadPromise;
+      } catch (_) {}
+    }
     if (!this.fullResImage) return null;
 
     const exportBtn = document.getElementById('export-btn');
@@ -907,10 +970,19 @@ export class HalationStudioApp {
       this.lastExportedBlob = finalBlob;
       this.lastExportedFilename = outFilename;
 
-      const url = URL.createObjectURL(finalBlob);
+      const downloadTarget =
+        typeof File !== 'undefined'
+          ? new File([finalBlob], outFilename, {
+              type: this.exportMime,
+              lastModified: Date.now(),
+            })
+          : finalBlob;
+
+      const url = URL.createObjectURL(downloadTarget);
       const a = document.createElement('a');
       a.href = url;
       a.download = outFilename;
+      a.rel = 'noopener';
       document.body.appendChild(a);
       a.click();
       a.remove();

@@ -202,6 +202,168 @@ function parseXmpTitle(xmpBytes) {
 }
 
 /**
+ * Parses IFD0 of a raw EXIF TIFF buffer to extract the EXIF Orientation tag (0x0112).
+ * Returns 1..8 (defaults to 1 = Horizontal / Normal).
+ */
+export function parseExifOrientation(tiffBytes) {
+  if (!tiffBytes || tiffBytes.length < 8) return 1;
+  const endian = bytesToAscii(tiffBytes, 0, 2);
+  const le = endian === 'II';
+  if (!le && endian !== 'MM') return 1;
+
+  const read16 = (off) =>
+    le
+      ? (tiffBytes[off] | (tiffBytes[off + 1] << 8)) >>> 0
+      : ((tiffBytes[off] << 8) | tiffBytes[off + 1]) >>> 0;
+  const read32 = (off) =>
+    le ? readU32LE(tiffBytes, off) : readU32BE(tiffBytes, off);
+
+  if (read16(2) !== 42) return 1;
+  const ifd0Offset = read32(4);
+  if (ifd0Offset + 2 > tiffBytes.length) return 1;
+
+  const numEntries = read16(ifd0Offset);
+  for (let i = 0; i < numEntries; i++) {
+    const entryOffset = ifd0Offset + 2 + i * 12;
+    if (entryOffset + 12 > tiffBytes.length) break;
+    const tag = read16(entryOffset);
+    const type = read16(entryOffset + 2);
+    if (tag === 0x0112) {
+      const val = type === 4 ? read32(entryOffset + 8) : read16(entryOffset + 8);
+      if (val >= 1 && val <= 8) return val;
+    }
+  }
+  return 1;
+}
+
+/**
+ * Normalizes EXIF Orientation (0x0112) in IFD0/IFD1 to 1 (upright normal) and swaps
+ * coded width/height tags when the original orientation was 90°/270° (5, 6, 7, 8),
+ * because browser canvas rendering already bakes pixels in upright display orientation.
+ */
+export function normalizeExifOrientation(tiffBytes) {
+  if (!tiffBytes || tiffBytes.length < 8) return tiffBytes;
+  const endian = bytesToAscii(tiffBytes, 0, 2);
+  const le = endian === 'II';
+  if (!le && endian !== 'MM') return tiffBytes;
+
+  const out = tiffBytes.slice();
+  const read16 = (off) =>
+    le
+      ? (out[off] | (out[off + 1] << 8)) >>> 0
+      : ((out[off] << 8) | out[off + 1]) >>> 0;
+  const write16 = (off, val) => {
+    if (le) {
+      out[off] = val & 0xff;
+      out[off + 1] = (val >>> 8) & 0xff;
+    } else {
+      out[off] = (val >>> 8) & 0xff;
+      out[off + 1] = val & 0xff;
+    }
+  };
+  const read32 = (off) => (le ? readU32LE(out, off) : readU32BE(out, off));
+  const write32 = (off, val) => (le ? writeU32LE(out, off, val) : writeU32BE(out, off, val));
+
+  if (read16(2) !== 42) return out;
+  const ifd0Offset = read32(4);
+  if (ifd0Offset + 2 > out.length) return out;
+
+  const readScalarEntry = (entryOffset) => {
+    const type = read16(entryOffset + 2);
+    return type === 3 ? read16(entryOffset + 8) : read32(entryOffset + 8);
+  };
+  const writeScalarEntry = (entryOffset, val) => {
+    const type = read16(entryOffset + 2);
+    if (type === 3) {
+      write16(entryOffset + 8, val);
+      write16(entryOffset + 10, 0);
+    } else {
+      write32(entryOffset + 8, val);
+    }
+  };
+
+  let origOrientation = 1;
+  let widthEntryPos = -1;
+  let heightEntryPos = -1;
+  let exifSubIfdOffset = 0;
+
+  const numEntries0 = read16(ifd0Offset);
+  for (let i = 0; i < numEntries0; i++) {
+    const entryOffset = ifd0Offset + 2 + i * 12;
+    if (entryOffset + 12 > out.length) break;
+    const tag = read16(entryOffset);
+    if (tag === 0x0112) {
+      origOrientation = readScalarEntry(entryOffset);
+      writeScalarEntry(entryOffset, 1);
+    } else if (tag === 0x0100) {
+      widthEntryPos = entryOffset;
+    } else if (tag === 0x0101) {
+      heightEntryPos = entryOffset;
+    } else if (tag === 0x8769) {
+      exifSubIfdOffset = read32(entryOffset + 8);
+    }
+  }
+
+  // If original orientation rotated 90°/270° (5..8), swap coded width/height tags to match upright pixels
+  if (origOrientation >= 5 && origOrientation <= 8) {
+    if (widthEntryPos >= 0 && heightEntryPos >= 0) {
+      const wVal = readScalarEntry(widthEntryPos);
+      const hVal = readScalarEntry(heightEntryPos);
+      writeScalarEntry(widthEntryPos, hVal);
+      writeScalarEntry(heightEntryPos, wVal);
+    }
+    if (exifSubIfdOffset > 0 && exifSubIfdOffset + 2 <= out.length) {
+      const subEntries = read16(exifSubIfdOffset);
+      let subWPos = -1;
+      let subHPos = -1;
+      for (let i = 0; i < subEntries; i++) {
+        const entryOffset = exifSubIfdOffset + 2 + i * 12;
+        if (entryOffset + 12 > out.length) break;
+        const tag = read16(entryOffset);
+        if (tag === 0xa002) subWPos = entryOffset;
+        else if (tag === 0xa003) subHPos = entryOffset;
+      }
+      if (subWPos >= 0 && subHPos >= 0) {
+        const sw = readScalarEntry(subWPos);
+        const sh = readScalarEntry(subHPos);
+        writeScalarEntry(subWPos, sh);
+        writeScalarEntry(subHPos, sw);
+      }
+    }
+  }
+
+  // Also normalize IFD1 (thumbnail IFD) orientation if present
+  const nextIfdPtrPos = ifd0Offset + 2 + numEntries0 * 12;
+  if (nextIfdPtrPos + 4 <= out.length) {
+    const ifd1Offset = read32(nextIfdPtrPos);
+    if (ifd1Offset > 0 && ifd1Offset + 2 <= out.length) {
+      const numEntries1 = read16(ifd1Offset);
+      for (let i = 0; i < numEntries1; i++) {
+        const entryOffset = ifd1Offset + 2 + i * 12;
+        if (entryOffset + 12 > out.length) break;
+        if (read16(entryOffset) === 0x0112) {
+          writeScalarEntry(entryOffset, 1);
+        }
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Normalizes XMP tiff:Orientation attribute or element to "1" (upright normal).
+ */
+export function normalizeXmpOrientation(xmpBytes) {
+  if (!xmpBytes || xmpBytes.length === 0) return xmpBytes;
+  const xml = textDecoder.decode(xmpBytes);
+  const updated = xml
+    .replace(/tiff:Orientation\s*=\s*(["'])[1-8]\1/gi, 'tiff:Orientation=$11$1')
+    .replace(/<tiff:Orientation>\s*[1-8]\s*<\/tiff:Orientation>/gi, '<tiff:Orientation>1</tiff:Orientation>');
+  return updated === xml ? xmpBytes : textEncoder.encode(updated);
+}
+
+/**
  * Creates a valid PNG chunk [4B length][4B type][data][4B CRC32].
  */
 export function createPngChunk(typeStr, dataBytes) {
@@ -271,6 +433,7 @@ export function extractImageMetadata(buffer, mimeHint = '', fileName = '') {
   const bundle = {
     format,
     fileName: fileName || '',
+    originalFileName: fileName || '',
     title: '',
     hasMetadata: false,
     tagsSummary: [],
@@ -474,6 +637,8 @@ export function extractImageMetadata(buffer, mimeHint = '', fileName = '') {
     bundle.title = cleanFileTitle;
   }
 
+  bundle.orientation = bundle.rawExifTiff ? parseExifOrientation(bundle.rawExifTiff) : 1;
+
   return bundle;
 }
 
@@ -596,6 +761,8 @@ export function stripImageMetadataBytes(buffer, mimeHint = '') {
 
 /**
  * Injects preserved metadata into an encoded JPEG, PNG, or WebP byte array.
+ * Automatically normalizes EXIF & XMP Orientation tags to 1 (upright normal) because
+ * the canvas-encoded pixel stream is already oriented upright by the browser.
  */
 export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = '') {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer || 0);
@@ -603,23 +770,36 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
 
   const format =
     detectImageMime(bytes) !== 'unknown' ? detectImageMime(bytes) : targetMime;
+  const xmpPrefix = asciiToBytes(XMP_HEADER_STR);
 
   if (format === 'image/jpeg' && bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
     let segmentsToInject = [];
 
     if (metadataBundle.jpegSegments && metadataBundle.jpegSegments.length > 0) {
-      segmentsToInject = metadataBundle.jpegSegments;
+      segmentsToInject = metadataBundle.jpegSegments.map((seg) => {
+        if (seg.length >= 10 && seg[0] === 0xff && seg[1] === 0xe1) {
+          const payload = seg.slice(4);
+          if (startsWithBytes(payload, EXIF_HEADER)) {
+            const normTiff = normalizeExifOrientation(payload.slice(6));
+            return createJpegSegment(0xe1, concatUint8Arrays([EXIF_HEADER, normTiff])) || seg;
+          }
+          if (startsWithBytes(payload, xmpPrefix)) {
+            const normXmp = normalizeXmpOrientation(payload.slice(xmpPrefix.length));
+            return createJpegSegment(0xe1, concatUint8Arrays([xmpPrefix, normXmp])) || seg;
+          }
+        }
+        return seg;
+      });
     } else {
       if (metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) {
-        const payload = concatUint8Arrays([EXIF_HEADER, metadataBundle.rawExifTiff]);
+        const normTiff = normalizeExifOrientation(metadataBundle.rawExifTiff);
+        const payload = concatUint8Arrays([EXIF_HEADER, normTiff]);
         const seg = createJpegSegment(0xe1, payload);
         if (seg) segmentsToInject.push(seg);
       }
       if (metadataBundle.rawXmp && metadataBundle.rawXmp.length > 0) {
-        const payload = concatUint8Arrays([
-          asciiToBytes(XMP_HEADER_STR),
-          metadataBundle.rawXmp,
-        ]);
+        const normXmp = normalizeXmpOrientation(metadataBundle.rawXmp);
+        const payload = concatUint8Arrays([xmpPrefix, normXmp]);
         const seg = createJpegSegment(0xe1, payload);
         if (seg) segmentsToInject.push(seg);
       }
@@ -663,13 +843,29 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
     let chunksToInsert = [];
 
     if (metadataBundle.pngChunks && metadataBundle.pngChunks.length > 0) {
-      chunksToInsert = metadataBundle.pngChunks.map((c) => c.rawChunk);
+      chunksToInsert = metadataBundle.pngChunks.map((c) => {
+        if (c.type === 'eXIf' && c.data && c.data.length > 0) {
+          const rawTiff = startsWithBytes(c.data, EXIF_HEADER) ? c.data.slice(6) : c.data;
+          return createPngChunk('eXIf', normalizeExifOrientation(rawTiff));
+        }
+        if ((c.type === 'iTXt' || c.type === 'tEXt') && c.data && c.data.length > 0) {
+          const normData = normalizeXmpOrientation(c.data);
+          if (normData !== c.data) {
+            return createPngChunk(c.type, normData);
+          }
+        }
+        return c.rawChunk;
+      });
     } else {
       if (metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) {
-        chunksToInsert.push(createPngChunk('eXIf', metadataBundle.rawExifTiff));
+        chunksToInsert.push(
+          createPngChunk('eXIf', normalizeExifOrientation(metadataBundle.rawExifTiff))
+        );
       }
       if (metadataBundle.rawXmp && metadataBundle.rawXmp.length > 0) {
-        chunksToInsert.push(createPngITXtChunk('XML:com.adobe.xmp', metadataBundle.rawXmp));
+        chunksToInsert.push(
+          createPngITXtChunk('XML:com.adobe.xmp', normalizeXmpOrientation(metadataBundle.rawXmp))
+        );
       }
       if (metadataBundle.title) {
         chunksToInsert.push(createPngTextChunk('Title', metadataBundle.title));
@@ -715,7 +911,15 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
 
     if (metadataBundle.webpChunks && metadataBundle.webpChunks.length > 0) {
       for (const c of metadataBundle.webpChunks) {
-        metaChunks.push(c);
+        let chunkData = c.data;
+        if (c.fourCC === 'EXIF' && chunkData && chunkData.length > 0) {
+          chunkData = startsWithBytes(chunkData, EXIF_HEADER)
+            ? concatUint8Arrays([EXIF_HEADER, normalizeExifOrientation(chunkData.slice(6))])
+            : normalizeExifOrientation(chunkData);
+        } else if (c.fourCC === 'XMP ' && chunkData && chunkData.length > 0) {
+          chunkData = normalizeXmpOrientation(chunkData);
+        }
+        metaChunks.push({ fourCC: c.fourCC, data: chunkData });
         if (c.fourCC === 'ICCP') flagsMask |= 0x20;
         if (c.fourCC === 'EXIF') flagsMask |= 0x08;
         if (c.fourCC === 'XMP ') flagsMask |= 0x04;
@@ -726,11 +930,17 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
         flagsMask |= 0x20;
       }
       if (metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) {
-        metaChunks.push({ fourCC: 'EXIF', data: metadataBundle.rawExifTiff });
+        metaChunks.push({
+          fourCC: 'EXIF',
+          data: normalizeExifOrientation(metadataBundle.rawExifTiff),
+        });
         flagsMask |= 0x08;
       }
       if (metadataBundle.rawXmp && metadataBundle.rawXmp.length > 0) {
-        metaChunks.push({ fourCC: 'XMP ', data: metadataBundle.rawXmp });
+        metaChunks.push({
+          fourCC: 'XMP ',
+          data: normalizeXmpOrientation(metadataBundle.rawXmp),
+        });
         flagsMask |= 0x04;
       }
     }
@@ -795,57 +1005,74 @@ export function getExactExportFilename(originalFileName, originalMime, targetMim
   const fallback = `photo.${targetExt || 'png'}`;
   if (!originalFileName || typeof originalFileName !== 'string') return fallback;
 
-  const trimmed = originalFileName.trim();
-  if (!trimmed) return fallback;
+  const baseName = originalFileName.trim().split(/[/\\]/).pop()?.trim() || '';
+  if (!baseName) return fallback;
 
-  const extMatch = trimmed.match(/^(.*)\.([^.]+)$/);
+  const extMatch = baseName.match(/^(.*)\.([^.]+)$/);
   if (!extMatch) {
-    return `${trimmed}.${targetExt || 'png'}`;
+    return `${baseName}.${targetExt || 'png'}`;
   }
 
-  const stem = extMatch[1] || trimmed;
+  const stem = extMatch[1] || baseName;
   const origExt = extMatch[2];
   const origExtLower = origExt.toLowerCase();
 
   const mimeMatchesExt =
+    !targetMime ||
     (targetMime === 'image/jpeg' && (origExtLower === 'jpg' || origExtLower === 'jpeg')) ||
     (targetMime === 'image/png' && origExtLower === 'png') ||
     (targetMime === 'image/webp' && origExtLower === 'webp') ||
     (originalMime && targetMime === originalMime);
 
   if (mimeMatchesExt) {
-    return trimmed;
+    return baseName;
   }
 
   return `${stem}.${targetExt || origExtLower}`;
 }
 
 /**
- * Builds a minimal valid EXIF TIFF payload with ImageDescription (Title), Make, Model, Software, and Artist
- * for automated tests and verification.
+ * Builds a valid EXIF TIFF payload with ImageDescription (Title), Make, Model, Artist,
+ * and optional Orientation (0x0112) and dimensions (0x0100, 0x0101) for tests and verification.
  */
 export function buildExifTiffPayload({
   title = 'Midnight Neon Kiosk',
   artist = 'Halation Studio Photographer',
   make = 'Leica Camera AG',
   model = 'Leica M6 TTL 35mm',
+  orientation = null,
+  width = null,
+  height = null,
 } = {}) {
   // Little-endian TIFF ('II', 42, IFD0 at offset 8)
-  const entries = [
-    { tag: 0x010e, str: title },  // ImageDescription (Title)
-    { tag: 0x010f, str: make },   // Make
-    { tag: 0x0110, str: model },  // Model
-    { tag: 0x013b, str: artist }, // Artist
-  ];
+  const entries = [];
+  if (typeof width === 'number' && width > 0) {
+    entries.push({ tag: 0x0100, type: 4, scalar: width }); // ImageWidth
+  }
+  if (typeof height === 'number' && height > 0) {
+    entries.push({ tag: 0x0101, type: 4, scalar: height }); // ImageLength
+  }
+  entries.push(
+    { tag: 0x010e, type: 2, str: title }, // ImageDescription (Title)
+    { tag: 0x010f, type: 2, str: make },  // Make
+    { tag: 0x0110, type: 2, str: model }  // Model
+  );
+  if (typeof orientation === 'number' && orientation >= 1 && orientation <= 8) {
+    entries.push({ tag: 0x0112, type: 3, scalar: orientation }); // Orientation (SHORT)
+  }
+  entries.push({ tag: 0x013b, type: 2, str: artist }); // Artist
 
   const ifdSize = 2 + entries.length * 12 + 4;
   let dataOffset = 8 + ifdSize;
-  const encodedStrings = entries.map((e) => {
+  const prepared = entries.map((e) => {
+    if (e.type !== 2) {
+      return { tag: e.tag, type: e.type, count: 1, scalar: e.scalar };
+    }
     const bytes = textEncoder.encode(e.str + '\0');
     const pad = bytes.length & 1 ? 1 : 0;
     const buf = new Uint8Array(bytes.length + pad);
     buf.set(bytes, 0);
-    const item = { tag: e.tag, count: bytes.length, offset: dataOffset, buf };
+    const item = { tag: e.tag, type: 2, count: bytes.length, offset: dataOffset, buf };
     dataOffset += buf.length;
     return item;
   });
@@ -859,17 +1086,22 @@ export function buildExifTiffPayload({
   writeU32LE(out, 4, 8);
 
   // Number of entries
-  out[8] = entries.length & 0xff;
-  out[9] = (entries.length >>> 8) & 0xff;
+  out[8] = prepared.length & 0xff;
+  out[9] = (prepared.length >>> 8) & 0xff;
 
-  encodedStrings.forEach((item, idx) => {
+  prepared.forEach((item, idx) => {
     const pos = 10 + idx * 12;
     out[pos] = item.tag & 0xff;
     out[pos + 1] = (item.tag >>> 8) & 0xff;
-    out[pos + 2] = 2; // ASCII
+    out[pos + 2] = item.type & 0xff;
     out[pos + 3] = 0;
     writeU32LE(out, pos + 4, item.count);
-    if (item.count <= 4) {
+    if (item.type === 3) {
+      out[pos + 8] = item.scalar & 0xff;
+      out[pos + 9] = (item.scalar >>> 8) & 0xff;
+    } else if (item.type === 4) {
+      writeU32LE(out, pos + 8, item.scalar);
+    } else if (item.count <= 4) {
       out.set(item.buf.slice(0, item.count), pos + 8);
     } else {
       writeU32LE(out, pos + 8, item.offset);

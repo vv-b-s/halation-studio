@@ -735,6 +735,88 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
         const manualWebpFilename = document.getElementById('export-filename-preview').textContent;
         document.querySelector('.format-option[data-format="image/png"]').click();
 
+        // Part A.2: Horizontal (Landscape 120x80) JPEG with EXIF Orientation = 6 (90° CW tag)
+        // Verifies that exported horizontal images keep their exact horizontal orientation (120x80)
+        // and are not double-rotated sideways into 80x120, and keep the exact input filename!
+        const horizCanvas = document.createElement('canvas');
+        horizCanvas.width = 80;
+        horizCanvas.height = 120;
+        const hctx2 = horizCanvas.getContext('2d');
+        hctx2.fillStyle = '#080a0f';
+        hctx2.fillRect(0, 0, 80, 120);
+        hctx2.fillStyle = '#ffddaa';
+        hctx2.fillRect(20, 40, 40, 40);
+        const horizRawBlob = await new Promise(r => horizCanvas.toBlob(r, 'image/jpeg', 0.95));
+        const horizRawBytes = new Uint8Array(await horizRawBlob.arrayBuffer());
+
+        const exifOrient6 = buildExifTiffPayload({
+          title: 'Horizontal Landscape Study',
+          artist: 'Valentin Vasilev',
+          make: 'Sony',
+          model: 'A7RV',
+          orientation: 6,
+          width: 80,
+          height: 120,
+        });
+        const exifOrientPayload = new Uint8Array(6 + exifOrient6.length);
+        exifOrientPayload.set([0x45, 0x78, 0x69, 0x66, 0x00, 0x00], 0);
+        exifOrientPayload.set(exifOrient6, 6);
+        const app1Orient6 = createJpegSegment(0xe1, exifOrientPayload);
+
+        // Construct raw JPEG with Orientation = 6 directly (simulating a camera photo whose raw coded sensor is 80x120 with Orientation=6 -> 120x80 horizontal display)
+        const orientedJpegBytes = new Uint8Array(
+          2 + app1Orient6.length + (horizRawBytes.length - 2)
+        );
+        orientedJpegBytes.set([0xff, 0xd8], 0);
+        orientedJpegBytes.set(app1Orient6, 2);
+        orientedJpegBytes.set(horizRawBytes.subarray(2), 2 + app1Orient6.length);
+
+        const orientedHorizFile = new File([orientedJpegBytes], 'Horizontal_Sunset_0042.jpeg', {
+          type: 'image/jpeg',
+        });
+        await app.loadUserFile(orientedHorizFile);
+        const expHoriz = await app.exportPhoto();
+        const expHorizBytes = new Uint8Array(await expHoriz.blob.arrayBuffer());
+        const expHorizMeta = extractImageMetadata(expHorizBytes, 'image/jpeg', expHoriz.filename);
+
+        // Decode the exported JPEG in the browser and verify its rendered dimensions are horizontal (120 x 80)
+        const decodedExportImg = await new Promise((resolve, reject) => {
+          const img = new Image();
+          const u = URL.createObjectURL(expHoriz.blob);
+          img.onload = () => {
+            URL.revokeObjectURL(u);
+            resolve({ width: img.naturalWidth, height: img.naturalHeight });
+          };
+          img.onerror = reject;
+          img.src = u;
+        });
+
+        // Also test pure 160x90 horizontal PNG without EXIF orientation
+        const pureHorizCanvas = document.createElement('canvas');
+        pureHorizCanvas.width = 160;
+        pureHorizCanvas.height = 90;
+        const pctx = pureHorizCanvas.getContext('2d');
+        pctx.fillStyle = '#090b10';
+        pctx.fillRect(0, 0, 160, 90);
+        pctx.fillStyle = '#fffae6';
+        pctx.fillRect(60, 30, 40, 30);
+        const pureHorizBlob = await new Promise(r => pureHorizCanvas.toBlob(r, 'image/png'));
+        const pureHorizFile = new File([pureHorizBlob], 'Wide_Panorama_160x90.png', {
+          type: 'image/png',
+        });
+        await app.loadUserFile(pureHorizFile);
+        const expPureHoriz = await app.exportPhoto();
+        const decodedPureHoriz = await new Promise((resolve, reject) => {
+          const img = new Image();
+          const u = URL.createObjectURL(expPureHoriz.blob);
+          img.onload = () => {
+            URL.revokeObjectURL(u);
+            resolve({ width: img.naturalWidth, height: img.naturalHeight });
+          };
+          img.onerror = reject;
+          img.src = u;
+        });
+
         // Part B: PNG with eXIf + tEXt + iTXt XMP
         const tmpCanvas = document.createElement('canvas');
         tmpCanvas.width = 64;
@@ -816,6 +898,13 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
           jpegExifTitle: parseExifTitle(expJpegMeta.rawExifTiff),
           jpegSegCount: expJpegMeta.jpegSegments.length,
           manualWebpFilename,
+          horizExportFilename: expHoriz.filename,
+          horizExportOrientation: expHorizMeta.orientation,
+          horizDecodedWidth: decodedExportImg.width,
+          horizDecodedHeight: decodedExportImg.height,
+          pureHorizFilename: expPureHoriz.filename,
+          pureHorizWidth: decodedPureHoriz.width,
+          pureHorizHeight: decodedPureHoriz.height,
           export1Filename: export1.filename,
           export1HasMetadata: export1Meta.hasMetadata,
           export1Title: export1Meta.title,
@@ -832,6 +921,15 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
       assert.equal(metaRes.jpegExifTitle, 'Cinema Frame 800T');
       assert.equal(metaRes.jpegSegCount, 2);
       assert.equal(metaRes.manualWebpFilename, 'Cinema_Frame_800T.webp');
+
+      assert.equal(metaRes.horizExportFilename, 'Horizontal_Sunset_0042.jpeg');
+      assert.equal(metaRes.horizExportOrientation, 1);
+      assert.equal(metaRes.horizDecodedWidth, 120, 'Expected EXIF-oriented horizontal image to remain 120px wide on export');
+      assert.equal(metaRes.horizDecodedHeight, 80, 'Expected EXIF-oriented horizontal image to remain 80px tall on export');
+
+      assert.equal(metaRes.pureHorizFilename, 'Wide_Panorama_160x90.png');
+      assert.equal(metaRes.pureHorizWidth, 160);
+      assert.equal(metaRes.pureHorizHeight, 90);
 
       assert.equal(metaRes.export1Filename, 'Golden_Gate_Midnight_800T.png');
       assert.equal(metaRes.export1HasMetadata, true);
@@ -954,7 +1052,9 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
       const fileStats = {};
 
       for (const fname of targetFiles) {
-        const matchingEntries = scriptCoverages.filter((s) => s.url.endsWith('/' + fname));
+        const matchingEntries = scriptCoverages.filter((s) =>
+          s.url.split('?')[0].endsWith('/' + fname)
+        );
         assert.ok(matchingEntries.length > 0, `Expected V8 coverage entry for ${fname}`);
         const stats = computeFileLineCoverage(path.join(ROOT_DIR, fname), matchingEntries);
         fileStats[fname] = stats;

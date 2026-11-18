@@ -538,6 +538,9 @@ export class HalationEngine {
     this.imageHeight = h;
     this.canvas.width = w;
     this.canvas.height = h;
+    if (this.canvas.style) {
+      this.canvas.style.aspectRatio = `${w} / ${h}`;
+    }
 
     if (this.useFallback) {
       return;
@@ -547,7 +550,10 @@ export class HalationEngine {
     gl.bindTexture(gl.TEXTURE_2D, this.textures.source);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
-    if (w === natW && h === natH) {
+    const isImgElement =
+      typeof HTMLImageElement !== 'undefined' && imageSource instanceof HTMLImageElement;
+
+    if (w === natW && h === natH && !isImgElement) {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, imageSource);
     } else {
       const offscreen = document.createElement('canvas');
