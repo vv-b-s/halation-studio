@@ -320,7 +320,8 @@ export function normalizeExifOrientation(tiffBytes) {
         const entryOffset = exifSubIfdOffset + 2 + i * 12;
         if (entryOffset + 12 > out.length) break;
         const tag = read16(entryOffset);
-        if (tag === 0xa002) subWPos = entryOffset;
+        if (tag === 0x0112) writeScalarEntry(entryOffset, 1);
+        else if (tag === 0xa002) subWPos = entryOffset;
         else if (tag === 0xa003) subHPos = entryOffset;
       }
       if (subWPos >= 0 && subHPos >= 0) {
@@ -352,14 +353,14 @@ export function normalizeExifOrientation(tiffBytes) {
 }
 
 /**
- * Normalizes XMP tiff:Orientation attribute or element to "1" (upright normal).
+ * Normalizes XMP tiff:Orientation / exif:Orientation attribute or element to "1" (upright normal).
  */
 export function normalizeXmpOrientation(xmpBytes) {
   if (!xmpBytes || xmpBytes.length === 0) return xmpBytes;
   const xml = textDecoder.decode(xmpBytes);
   const updated = xml
-    .replace(/tiff:Orientation\s*=\s*(["'])[1-8]\1/gi, 'tiff:Orientation=$11$1')
-    .replace(/<tiff:Orientation>\s*[1-8]\s*<\/tiff:Orientation>/gi, '<tiff:Orientation>1</tiff:Orientation>');
+    .replace(/((?:tiff|exif):Orientation\s*=\s*(["']))[1-8]\2/gi, '$11$2')
+    .replace(/(<(?:tiff|exif):Orientation>\s*)[1-8](\s*<\/(?:tiff|exif):Orientation>)/gi, '$11$2');
   return updated === xml ? xmpBytes : textEncoder.encode(updated);
 }
 

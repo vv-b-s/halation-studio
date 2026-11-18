@@ -735,54 +735,54 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
         const manualWebpFilename = document.getElementById('export-filename-preview').textContent;
         document.querySelector('.format-option[data-format="image/png"]').click();
 
-        // Part A.2: Horizontal (Landscape 120x80) JPEG with EXIF Orientation = 6 (90° CW tag)
-        // Verifies that exported horizontal images keep their exact horizontal orientation (120x80)
-        // and are not double-rotated sideways into 80x120, and keep the exact input filename!
-        const horizCanvas = document.createElement('canvas');
-        horizCanvas.width = 80;
-        horizCanvas.height = 120;
-        const hctx2 = horizCanvas.getContext('2d');
-        hctx2.fillStyle = '#080a0f';
-        hctx2.fillRect(0, 0, 80, 120);
-        hctx2.fillStyle = '#ffddaa';
-        hctx2.fillRect(20, 40, 40, 40);
-        const horizRawBlob = await new Promise(r => horizCanvas.toBlob(r, 'image/jpeg', 0.95));
-        const horizRawBytes = new Uint8Array(await horizRawBlob.arrayBuffer());
+        // Part A.2: Vertical Portrait Photo (80x120 display) from a 120x80 landscape camera sensor with EXIF Orientation = 6 (90° CW tag)
+        // Verifies that exported vertical portrait photos keep their exact vertical orientation (80x120, height > width)
+        // and are not double-rotated sideways into 120x80, and keep the exact input filename!
+        const sensorCanvas = document.createElement('canvas');
+        sensorCanvas.width = 120;
+        sensorCanvas.height = 80;
+        const sctx2 = sensorCanvas.getContext('2d');
+        sctx2.fillStyle = '#080a0f';
+        sctx2.fillRect(0, 0, 120, 80);
+        sctx2.fillStyle = '#ffddaa';
+        sctx2.fillRect(40, 20, 40, 40);
+        const sensorRawBlob = await new Promise(r => sensorCanvas.toBlob(r, 'image/jpeg', 0.95));
+        const sensorRawBytes = new Uint8Array(await sensorRawBlob.arrayBuffer());
 
         const exifOrient6 = buildExifTiffPayload({
-          title: 'Horizontal Landscape Study',
+          title: 'Vertical Portrait Study',
           artist: 'Valentin Vasilev',
           make: 'Sony',
           model: 'A7RV',
           orientation: 6,
-          width: 80,
-          height: 120,
+          width: 120,
+          height: 80,
         });
         const exifOrientPayload = new Uint8Array(6 + exifOrient6.length);
         exifOrientPayload.set([0x45, 0x78, 0x69, 0x66, 0x00, 0x00], 0);
         exifOrientPayload.set(exifOrient6, 6);
         const app1Orient6 = createJpegSegment(0xe1, exifOrientPayload);
 
-        // Construct raw JPEG with Orientation = 6 directly (simulating a camera photo whose raw coded sensor is 80x120 with Orientation=6 -> 120x80 horizontal display)
+        // Construct raw JPEG with Orientation = 6 directly (simulating a vertical portrait camera photo whose raw coded sensor is 120x80 with Orientation=6 -> 80x120 vertical display)
         const orientedJpegBytes = new Uint8Array(
-          2 + app1Orient6.length + (horizRawBytes.length - 2)
+          2 + app1Orient6.length + (sensorRawBytes.length - 2)
         );
         orientedJpegBytes.set([0xff, 0xd8], 0);
         orientedJpegBytes.set(app1Orient6, 2);
-        orientedJpegBytes.set(horizRawBytes.subarray(2), 2 + app1Orient6.length);
+        orientedJpegBytes.set(sensorRawBytes.subarray(2), 2 + app1Orient6.length);
 
-        const orientedHorizFile = new File([orientedJpegBytes], 'Horizontal_Sunset_0042.jpeg', {
+        const orientedVertFile = new File([orientedJpegBytes], 'Vertical_Portrait_0042.jpeg', {
           type: 'image/jpeg',
         });
-        await app.loadUserFile(orientedHorizFile);
-        const expHoriz = await app.exportPhoto();
-        const expHorizBytes = new Uint8Array(await expHoriz.blob.arrayBuffer());
-        const expHorizMeta = extractImageMetadata(expHorizBytes, 'image/jpeg', expHoriz.filename);
+        await app.loadUserFile(orientedVertFile);
+        const expVert = await app.exportPhoto();
+        const expVertBytes = new Uint8Array(await expVert.blob.arrayBuffer());
+        const expVertMeta = extractImageMetadata(expVertBytes, 'image/jpeg', expVert.filename);
 
-        // Decode the exported JPEG in the browser and verify its rendered dimensions are horizontal (120 x 80)
+        // Decode the exported JPEG in the browser and verify its rendered dimensions are vertical (80 x 120)
         const decodedExportImg = await new Promise((resolve, reject) => {
           const img = new Image();
-          const u = URL.createObjectURL(expHoriz.blob);
+          const u = URL.createObjectURL(expVert.blob);
           img.onload = () => {
             URL.revokeObjectURL(u);
             resolve({ width: img.naturalWidth, height: img.naturalHeight });
@@ -898,10 +898,10 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
           jpegExifTitle: parseExifTitle(expJpegMeta.rawExifTiff),
           jpegSegCount: expJpegMeta.jpegSegments.length,
           manualWebpFilename,
-          horizExportFilename: expHoriz.filename,
-          horizExportOrientation: expHorizMeta.orientation,
-          horizDecodedWidth: decodedExportImg.width,
-          horizDecodedHeight: decodedExportImg.height,
+          vertExportFilename: expVert.filename,
+          vertExportOrientation: expVertMeta.orientation,
+          vertDecodedWidth: decodedExportImg.width,
+          vertDecodedHeight: decodedExportImg.height,
           pureHorizFilename: expPureHoriz.filename,
           pureHorizWidth: decodedPureHoriz.width,
           pureHorizHeight: decodedPureHoriz.height,
@@ -922,10 +922,10 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
       assert.equal(metaRes.jpegSegCount, 2);
       assert.equal(metaRes.manualWebpFilename, 'Cinema_Frame_800T.webp');
 
-      assert.equal(metaRes.horizExportFilename, 'Horizontal_Sunset_0042.jpeg');
-      assert.equal(metaRes.horizExportOrientation, 1);
-      assert.equal(metaRes.horizDecodedWidth, 120, 'Expected EXIF-oriented horizontal image to remain 120px wide on export');
-      assert.equal(metaRes.horizDecodedHeight, 80, 'Expected EXIF-oriented horizontal image to remain 80px tall on export');
+      assert.equal(metaRes.vertExportFilename, 'Vertical_Portrait_0042.jpeg');
+      assert.equal(metaRes.vertExportOrientation, 1);
+      assert.equal(metaRes.vertDecodedWidth, 80, 'Expected EXIF-oriented vertical image to remain 80px wide on export');
+      assert.equal(metaRes.vertDecodedHeight, 120, 'Expected EXIF-oriented vertical image to remain 120px tall on export');
 
       assert.equal(metaRes.pureHorizFilename, 'Wide_Panorama_160x90.png');
       assert.equal(metaRes.pureHorizWidth, 160);
