@@ -1,15 +1,15 @@
-import { HalationEngine, DEFAULT_PARAMS, PRESETS } from './halation-engine.js';
+import { HalationEngine, DEFAULT_PARAMS, PRESETS } from './halation-engine.js?v=1.4.0';
 import {
   extractImageMetadata,
   processExportBlobMetadata,
   getExactExportFilename,
-} from './metadata-utils.js';
+} from './metadata-utils.js?v=1.4.0';
 import {
   saveUploadedImageToCache,
   loadUploadedImageFromCache,
   saveStudioStateToCache,
   loadStudioStateFromCache,
-} from './session-cache.js';
+} from './session-cache.js?v=1.4.0';
 
 const BUILTIN_SAMPLES = {
   example1: {
@@ -799,14 +799,16 @@ export class HalationStudioApp {
       const metadata = extractImageMetadata(rawBytes, file.type, rawFileName);
       const detectedMime =
         metadata.format !== 'unknown' ? metadata.format : file.type || 'image/png';
+      const resolvedFileName = metadata.fileName || rawFileName;
 
       this.currentMetadata = metadata;
-      this.originalFileName = rawFileName;
+      this.originalFileName = resolvedFileName;
+      this.currentFilename = resolvedFileName.replace(/\.[^/.]+$/, '') || 'photo';
       this.originalMime = detectedMime;
 
       // Auto-select matching export format so export preserves exact upload format & filename by default
       if (!preserveExportFormat) {
-        const extMatch = rawFileName.match(/\.([^.]+)$/);
+        const extMatch = resolvedFileName.match(/\.([^.]+)$/);
         const origExtLower = extMatch ? extMatch[1].toLowerCase() : '';
         if (detectedMime === 'image/jpeg') {
           this._setExportFormat('image/jpeg', origExtLower === 'jpeg' ? 'jpeg' : 'jpg');
@@ -863,8 +865,8 @@ export class HalationStudioApp {
       await this._setImageFromUrl(objectUrl, seq);
       if (seq !== this._loadSeq) return;
 
-      if (!fromCache) {
-        await saveUploadedImageToCache(file, rawBytes);
+      if (!fromCache || resolvedFileName !== rawFileName) {
+        await saveUploadedImageToCache(this._cachedCustomImage.file, rawBytes);
       }
       await this._persistState();
 

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=1.3.0" />
+  <link rel="stylesheet" href="./styles.css?v=1.4.0" />
 </head>
 <body>
   <!-- Studio Header Bar -->
@@ -23,7 +23,7 @@
     </div>
 
     <div class="header-actions">
-      <input type="file" id="file-input" accept="image/*,.png,.jpg,.jpeg,.webp,.avif,.bmp,.tiff" hidden />
+      <input type="file" id="file-input" accept="image/*,application/octet-stream,.png,.jpg,.jpeg,.webp,.avif,.bmp,.tiff,.heic,.heif,.dng" hidden />
       <button type="button" id="upload-photo-btn" class="btn" title="Upload a photo from your device">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -394,6 +394,6 @@
 
   <div id="toast-banner" class="toast-banner" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=1.3.0"></script>
+  <script type="module" src="./app.js?v=1.4.0"></script>
 </body>
 </html>

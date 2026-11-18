@@ -16,9 +16,12 @@ import {
   createPngITXtChunk,
   createJpegSegment,
   parseExifTitle,
+  parseExifGps,
   parseExifOrientation,
   normalizeExifOrientation,
   normalizeXmpOrientation,
+  isSyntheticPickerFilename,
+  resolveOriginalFileName,
 } from '../metadata-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -430,4 +433,185 @@ test('Horizontal image orientation is preserved by normalizing EXIF & XMP Orient
   assert.equal(mmNormView.getUint16(60, false), 1000);
   assert.deepEqual(normalizeXmpOrientation(new Uint8Array([1, 2])), new Uint8Array([1, 2]));
 });
+
+test('EXIF and XMP GPS location coordinates are preserved across JPEG, PNG, and WebP exports and stripped when requested', () => {
+  // 1. Build an EXIF payload with GPS coordinates (Golden Gate Bridge: 37.8199° N, -122.4783° W, altitude 67.5m)
+  // and Orientation = 6 (portrait) to ensure normalizeExifOrientation never corrupts GPSInfo (0x8825)
+  const exifWithGps = buildExifTiffPayload({
+    title: 'Golden Gate Fog Halation',
+    artist: 'Valentin Vasilev',
+    make: 'Google',
+    model: 'Pixel 9 Pro',
+    orientation: 6,
+    width: 3000,
+    height: 4000,
+    dateTime: '2026:05:14 19:22:10',
+    gps: {
+      latitude: 37.8199,
+      longitude: -122.4783,
+      altitude: 67.5,
+    },
+  });
+
+  const parsedGps = parseExifGps(exifWithGps);
+  assert.ok(parsedGps, 'Expected parseExifGps to decode GPSInfo IFD');
+  assert.ok(Math.abs(parsedGps.latitude - 37.8199) < 0.0001);
+  assert.ok(Math.abs(parsedGps.longitude - -122.4783) < 0.0001);
+  assert.equal(parsedGps.latitudeRef, 'N');
+  assert.equal(parsedGps.longitudeRef, 'W');
+  assert.equal(parsedGps.altitude, 67.5);
+
+  // Verify Southern/Eastern + below-sea-level altitude GPS coordinates
+  const exifSouthEast = buildExifTiffPayload({
+    title: 'Sydney Harbour Night',
+    gps: { latitude: -33.8568, longitude: 151.2153, altitude: -12.4 },
+  });
+  const seGps = parseExifGps(exifSouthEast);
+  assert.ok(Math.abs(seGps.latitude - -33.8568) < 0.0001);
+  assert.ok(Math.abs(seGps.longitude - 151.2153) < 0.0001);
+  assert.equal(seGps.latitudeRef, 'S');
+  assert.equal(seGps.longitudeRef, 'E');
+  assert.equal(seGps.altitude, -12.4);
+
+  // 2. Test multi-APP1 smartphone JPEG (first APP1 has EXIF+GPS, second APP1 has secondary EXIF without GPS)
+  const primaryExifPayload = new Uint8Array(6 + exifWithGps.length);
+  primaryExifPayload.set([0x45, 0x78, 0x69, 0x66, 0x00, 0x00], 0);
+  primaryExifPayload.set(exifWithGps, 6);
+  const app1Primary = createJpegSegment(0xe1, primaryExifPayload);
+
+  const secondaryTiff = buildExifTiffPayload({ title: 'Secondary Segment Without GPS' });
+  const secondaryExifPayload = new Uint8Array(6 + secondaryTiff.length);
+  secondaryExifPayload.set([0x45, 0x78, 0x69, 0x66, 0x00, 0xff], 0); // non-zero 6th padding byte
+  secondaryExifPayload.set(secondaryTiff, 6);
+  const app1Secondary = createJpegSegment(0xe1, secondaryExifPayload);
+
+  const xmpWithGps =
+    '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description exif:GPSLatitude="37,49.194N" exif:GPSLongitude="122,28.698W"/></rdf:RDF></x:xmpmeta>';
+  const app1XmpGps = createJpegSegment(
+    0xe1,
+    new TextEncoder().encode('http://ns.adobe.com/xap/1.0/\0' + xmpWithGps)
+  );
+
+  const multiApp1Jpeg = new Uint8Array([
+    0xff, 0xd8,
+    ...app1Primary,
+    ...app1Secondary,
+    ...app1XmpGps,
+    ...createMinimalJpegBytes().subarray(2),
+  ]);
+
+  const extracted = extractImageMetadata(multiApp1Jpeg, 'image/jpeg', 'PXL_20260514_192210.jpg');
+  assert.equal(extracted.hasGps, true);
+  assert.ok(extracted.tagsSummary.includes('GPS'));
+  assert.ok(Math.abs(extracted.gps.latitude - 37.8199) < 0.0001);
+  assert.ok(Math.abs(extracted.gps.longitude - -122.4783) < 0.0001);
+
+  // Inject into a freshly encoded canvas JPEG (which starts with SOI + APP0 JFIF)
+  const exportedJpeg = injectImageMetadataBytes(createMinimalJpegBytes(), extracted, 'image/jpeg');
+  // Verify exported JPEG starts with SOI (FF D8) immediately followed by APP1 EXIF (FF E1) at offset 2
+  assert.equal(exportedJpeg[0], 0xff);
+  assert.equal(exportedJpeg[1], 0xd8);
+  assert.equal(exportedJpeg[2], 0xff);
+  assert.equal(exportedJpeg[3], 0xe1);
+
+  const reExtractedJpeg = extractImageMetadata(exportedJpeg, 'image/jpeg', 'PXL_20260514_192210.jpg');
+  assert.equal(reExtractedJpeg.hasGps, true);
+  assert.equal(reExtractedJpeg.orientation, 1);
+  assert.ok(Math.abs(reExtractedJpeg.gps.latitude - 37.8199) < 0.0001);
+  assert.ok(Math.abs(reExtractedJpeg.gps.longitude - -122.4783) < 0.0001);
+  assert.equal(reExtractedJpeg.gps.altitude, 67.5);
+
+  // 3. Cross-format export to PNG and WebP also preserves GPS coordinates
+  const samplePngPath = path.join(__dirname, '..', 'assets', 'examples', 'example1-input.png');
+  const basePng = stripImageMetadataBytes(new Uint8Array(fs.readFileSync(samplePngPath)), 'image/png');
+  const exportedPng = injectImageMetadataBytes(basePng, extracted, 'image/png');
+  const reExtractedPng = extractImageMetadata(exportedPng, 'image/png', 'PXL_20260514_192210.png');
+  assert.equal(reExtractedPng.hasGps, true);
+  assert.ok(Math.abs(reExtractedPng.gps.latitude - 37.8199) < 0.0001);
+  assert.ok(Math.abs(reExtractedPng.gps.longitude - -122.4783) < 0.0001);
+
+  const exportedWebp = injectImageMetadataBytes(
+    createMinimalWebpBytes({ withVp8x: true }),
+    extracted,
+    'image/webp'
+  );
+  const reExtractedWebp = extractImageMetadata(exportedWebp, 'image/webp', 'PXL_20260514_192210.webp');
+  assert.equal(reExtractedWebp.hasGps, true);
+  assert.ok(Math.abs(reExtractedWebp.gps.latitude - 37.8199) < 0.0001);
+  assert.ok(Math.abs(reExtractedWebp.gps.longitude - -122.4783) < 0.0001);
+
+  // 4. Stripping metadata removes GPS completely
+  const strippedJpeg = stripImageMetadataBytes(exportedJpeg, 'image/jpeg');
+  const strippedMeta = extractImageMetadata(strippedJpeg, 'image/jpeg', 'PXL_20260514_192210.jpg');
+  assert.equal(strippedMeta.hasGps, false);
+  assert.equal(strippedMeta.gps, null);
+});
+
+test('Synthetic mobile OS photo picker filenames (random numeric IDs & UUIDs) recover the original camera filename from EXIF/XMP', () => {
+  assert.equal(isSyntheticPickerFilename('1000038492.jpg'), true);
+  assert.equal(isSyntheticPickerFilename('38492.jpg'), true);
+  assert.equal(isSyntheticPickerFilename('image:1000038492.jpg'), true);
+  assert.equal(isSyntheticPickerFilename('msf:1000038492.jpeg'), true);
+  assert.equal(isSyntheticPickerFilename('7F8A9B12-3C4D-5E6F-7A8B-9C0D1E2F3A4B.jpeg'), true);
+  assert.equal(isSyntheticPickerFilename('IMG_4821.JPG'), false);
+  assert.equal(isSyntheticPickerFilename('PXL_20260514_192210123.jpg'), false);
+  assert.equal(isSyntheticPickerFilename('20260514_192210.jpg'), false);
+
+  // 1. Recover from XMP xmpMM:PreservedFileName
+  const xmpPreserved = new TextEncoder().encode(
+    '<x:xmpmeta><rdf:RDF><rdf:Description xmpMM:PreservedFileName="Leica_M6_Shinjuku.jpg"/></rdf:RDF></x:xmpmeta>'
+  );
+  assert.equal(
+    resolveOriginalFileName('1000038492.jpg', null, xmpPreserved),
+    'Leica_M6_Shinjuku.jpg'
+  );
+
+  // 2. Recover from EXIF DocumentName (0x010D)
+  const tiffWithDocName = buildExifTiffPayload({
+    title: 'Night Alley',
+    documentName: 'DSC_0984.JPG',
+  });
+  assert.equal(
+    resolveOriginalFileName('1000038492.jpg', tiffWithDocName, null),
+    'DSC_0984.JPG'
+  );
+
+  // 3. Recover from EXIF DateTimeOriginal (0x9003) + Make (Google Pixel -> PXL_YYYYMMDD_HHMMSS.jpg, Samsung -> YYYYMMDD_HHMMSS.jpg, others -> IMG_YYYYMMDD_HHMMSS.jpg)
+  const pixelTiff = buildExifTiffPayload({
+    make: 'Google',
+    model: 'Pixel 9 Pro',
+    dateTime: '2026:05:14 19:22:10',
+  });
+  assert.equal(
+    resolveOriginalFileName('1000038492.jpg', pixelTiff, null),
+    'PXL_20260514_192210.jpg'
+  );
+
+  const samsungTiff = buildExifTiffPayload({
+    make: 'Samsung',
+    model: 'SM-S928B',
+    dateTime: '2026:05:14 19:22:10',
+  });
+  assert.equal(
+    resolveOriginalFileName('1000038492.jpg', samsungTiff, null),
+    '20260514_192210.jpg'
+  );
+
+  const appleTiff = buildExifTiffPayload({
+    make: 'Apple',
+    model: 'iPhone 16 Pro',
+    dateTime: '2026:05:14 19:22:10',
+  });
+  assert.equal(
+    resolveOriginalFileName('7F8A9B12-3C4D-5E6F-7A8B-9C0D1E2F3A4B.jpeg', appleTiff, null),
+    'IMG_20260514_192210.jpeg'
+  );
+
+  // 4. Normal filenames are never altered even when EXIF DateTimeOriginal or DocumentName is present
+  assert.equal(
+    resolveOriginalFileName('My_Custom_Photo_Title.jpg', pixelTiff, xmpPreserved),
+    'My_Custom_Photo_Title.jpg'
+  );
+});
+
 

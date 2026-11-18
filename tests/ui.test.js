@@ -817,6 +817,46 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
           img.src = u;
         });
 
+        // Part A.3: Photo with EXIF GPS location coordinates AND a synthetic mobile photo picker numeric filename ("1000038492.jpg")
+        // Verifies that:
+        // 1) #file-input accept attribute includes application/octet-stream to bypass Android Photo Picker GPS stripping & filename randomization
+        // 2) If a mobile OS picker still passes a random number filename ("1000038492.jpg"), the app recovers the real camera filename ("PXL_20260514_192210.jpg")
+        // 3) The exported JPEG preserves the exact EXIF GPS latitude, longitude, and altitude coordinates
+        const fileInputAccept = document.getElementById('file-input').getAttribute('accept') || '';
+        const exifGpsPayload = buildExifTiffPayload({
+          title: 'Marin Headlands Halation',
+          artist: 'Valentin Vasilev',
+          make: 'Google',
+          model: 'Pixel 9 Pro',
+          orientation: 6,
+          width: 120,
+          height: 80,
+          dateTime: '2026:05:14 19:22:10',
+          gps: {
+            latitude: 37.8199,
+            longitude: -122.4783,
+            altitude: 67.5,
+          },
+        });
+        const app1GpsBuf = new Uint8Array(6 + exifGpsPayload.length);
+        app1GpsBuf.set([0x45, 0x78, 0x69, 0x66, 0x00, 0x00], 0);
+        app1GpsBuf.set(exifGpsPayload, 6);
+        const app1GpsSeg = createJpegSegment(0xe1, app1GpsBuf);
+        const gpsJpegBytes = new Uint8Array(2 + app1GpsSeg.length + (sensorRawBytes.length - 2));
+        gpsJpegBytes.set([0xff, 0xd8], 0);
+        gpsJpegBytes.set(app1GpsSeg, 2);
+        gpsJpegBytes.set(sensorRawBytes.subarray(2), 2 + app1GpsSeg.length);
+
+        const syntheticPickerFile = new File([gpsJpegBytes], '1000038492.jpg', {
+          type: 'image/jpeg',
+        });
+        await app.loadUserFile(syntheticPickerFile);
+        const gpsBadgeText = document.getElementById('metadata-status-badge').textContent.trim();
+        const gpsPreviewFilename = document.getElementById('export-filename-preview').textContent.trim();
+        const expGps = await app.exportPhoto();
+        const expGpsBytes = new Uint8Array(await expGps.blob.arrayBuffer());
+        const expGpsMeta = extractImageMetadata(expGpsBytes, 'image/jpeg', expGps.filename);
+
         // Part B: PNG with eXIf + tEXt + iTXt XMP
         const tmpCanvas = document.createElement('canvas');
         tmpCanvas.width = 64;
@@ -905,6 +945,12 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
           pureHorizFilename: expPureHoriz.filename,
           pureHorizWidth: decodedPureHoriz.width,
           pureHorizHeight: decodedPureHoriz.height,
+          fileInputAccept,
+          gpsBadgeText,
+          gpsPreviewFilename,
+          gpsExportFilename: expGps.filename,
+          gpsExportHasGps: expGpsMeta.hasGps,
+          gpsExportCoords: expGpsMeta.gps,
           export1Filename: export1.filename,
           export1HasMetadata: export1Meta.hasMetadata,
           export1Title: export1Meta.title,
@@ -930,6 +976,18 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
       assert.equal(metaRes.pureHorizFilename, 'Wide_Panorama_160x90.png');
       assert.equal(metaRes.pureHorizWidth, 160);
       assert.equal(metaRes.pureHorizHeight, 90);
+
+      assert.ok(
+        metaRes.fileInputAccept.includes('application/octet-stream'),
+        'Expected #file-input accept attribute to include application/octet-stream so mobile Chrome bypasses the GPS-stripping Android Photo Picker'
+      );
+      assert.ok(metaRes.gpsBadgeText.includes('GPS'), 'Expected metadata badge to indicate GPS tag detected');
+      assert.equal(metaRes.gpsPreviewFilename, 'PXL_20260514_192210.jpg');
+      assert.equal(metaRes.gpsExportFilename, 'PXL_20260514_192210.jpg');
+      assert.equal(metaRes.gpsExportHasGps, true);
+      assert.ok(Math.abs(metaRes.gpsExportCoords.latitude - 37.8199) < 0.0001);
+      assert.ok(Math.abs(metaRes.gpsExportCoords.longitude - -122.4783) < 0.0001);
+      assert.equal(metaRes.gpsExportCoords.altitude, 67.5);
 
       assert.equal(metaRes.export1Filename, 'Golden_Gate_Midnight_800T.png');
       assert.equal(metaRes.export1HasMetadata, true);
