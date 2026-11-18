@@ -1,15 +1,15 @@
-import { HalationEngine, DEFAULT_PARAMS, PRESETS } from './halation-engine.js?v=1.4.0';
+import { HalationEngine, DEFAULT_PARAMS, PRESETS } from './halation-engine.js?v=1.5.0';
 import {
   extractImageMetadata,
   processExportBlobMetadata,
   getExactExportFilename,
-} from './metadata-utils.js?v=1.4.0';
+} from './metadata-utils.js?v=1.5.0';
 import {
   saveUploadedImageToCache,
   loadUploadedImageFromCache,
   saveStudioStateToCache,
   loadStudioStateFromCache,
-} from './session-cache.js?v=1.4.0';
+} from './session-cache.js?v=1.5.0';
 
 const BUILTIN_SAMPLES = {
   example1: {
@@ -65,6 +65,8 @@ export class HalationStudioApp {
     // Async load sequencing so background sample fetches never overwrite a user upload
     this._loadSeq = 0;
     this._activeLoadPromise = null;
+    this._deferredInstallPrompt = null;
+    this.swRegistrationPromise = null;
 
     // DOM elements
     this.canvas = document.getElementById('render-canvas');
@@ -84,6 +86,7 @@ export class HalationStudioApp {
     this._bindZoomAndPan();
     this._bindFileUploadAndDrop();
     this._bindMobileTabs();
+    this._initPwaSupport();
 
     // Restore cached session / uploaded image or fall back to Example 1
     this.readyPromise = this._restoreSessionOrDefault();
@@ -709,6 +712,63 @@ export class HalationStudioApp {
         });
       });
     });
+  }
+
+  _initPwaSupport() {
+    // 1. Register offline-capable Service Worker
+    if (
+      'serviceWorker' in navigator &&
+      (location.protocol === 'https:' ||
+        location.hostname === 'localhost' ||
+        location.hostname === '127.0.0.1')
+    ) {
+      this.swRegistrationPromise = navigator.serviceWorker
+        .register('./sw.js', { scope: './' })
+        .catch(() => null);
+    }
+
+    // 2. Native Homescreen / Desktop Install Prompt Flow
+    const installBtn = document.getElementById('install-app-btn');
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      this._deferredInstallPrompt = e;
+      if (installBtn) {
+        installBtn.style.display = 'inline-flex';
+      }
+    });
+
+    window.addEventListener('appinstalled', () => {
+      this._deferredInstallPrompt = null;
+      if (installBtn) {
+        installBtn.style.display = 'none';
+      }
+      this.showToast('Halation Optical Studio installed to your device');
+    });
+
+    if (installBtn) {
+      installBtn.addEventListener('click', async () => {
+        if (!this._deferredInstallPrompt) return;
+        const promptEvent = this._deferredInstallPrompt;
+        this._deferredInstallPrompt = null;
+        await promptEvent.prompt();
+        const choice = await promptEvent.userChoice;
+        if (choice?.outcome === 'accepted') {
+          installBtn.style.display = 'none';
+        }
+      });
+    }
+
+    // 3. OS File Handling API (opening image files directly into the installed PWA)
+    this._handleLaunchQueueParams = async (launchParams) => {
+      const handle = launchParams?.files?.[0];
+      if (handle && typeof handle.getFile === 'function') {
+        const file = await handle.getFile();
+        if (file) await this.loadUserFile(file);
+      }
+    };
+    if ('launchQueue' in window && window.launchQueue?.setConsumer) {
+      window.launchQueue.setConsumer(this._handleLaunchQueueParams);
+    }
   }
 
   async loadBuiltinSample(sampleKey, { skipPersist = false, preserveViewMode = false } = {}) {

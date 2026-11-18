@@ -35,6 +35,12 @@
   --radius-lg: 14px;
   --header-h: 58px;
   --panel-w: 400px;
+
+  /* Native PWA Safe Area Insets (Notch / Dynamic Island / Home Indicator) */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
 }
 
 *,
@@ -48,6 +54,7 @@
 html,
 body {
   height: 100%;
+  height: 100dvh;
   width: 100%;
   background-color: var(--bg-void);
   color: var(--text-primary);
@@ -57,6 +64,9 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -66,13 +76,13 @@ body {
    ========================================================================== */
 
 .studio-header {
-  height: var(--header-h);
+  height: calc(var(--header-h) + var(--safe-top));
   background-color: var(--bg-panel);
   border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 18px;
+  padding: var(--safe-top) calc(18px + var(--safe-right)) 0 calc(18px + var(--safe-left));
   gap: 12px;
   z-index: 30;
 }
@@ -197,6 +207,18 @@ body {
   font-size: 12px;
 }
 
+.btn-install {
+  background-color: var(--accent-amber-soft);
+  border-color: hsla(31, 95%, 58%, 0.42);
+  color: var(--accent-amber);
+}
+
+.btn-install:hover {
+  background-color: hsla(31, 95%, 58%, 0.24);
+  border-color: hsla(31, 95%, 65%, 0.65);
+  color: #fff;
+}
+
 .btn svg {
   width: 15px;
   height: 15px;
@@ -210,8 +232,10 @@ body {
 .studio-workspace {
   display: grid;
   grid-template-columns: 1fr var(--panel-w);
-  height: calc(100% - var(--header-h));
+  height: calc(100% - var(--header-h) - var(--safe-top));
   width: 100%;
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
   overflow: hidden;
 }
 
@@ -918,7 +942,7 @@ body {
    ========================================================================== */
 
 .export-dock {
-  padding: 13px 16px;
+  padding: 13px 16px calc(13px + var(--safe-bottom));
   background-color: var(--bg-panel);
   border-top: 1px solid var(--border-subtle);
   display: flex;
@@ -1016,7 +1040,7 @@ body {
 /* Toast Notification */
 .toast-banner {
   position: fixed;
-  bottom: 20px;
+  bottom: calc(20px + var(--safe-bottom));
   left: 50%;
   transform: translate(-50%, 20px);
   background-color: hsl(220, 15%, 12%);
@@ -1123,13 +1147,13 @@ body {
   }
 
   .export-dock {
-    padding: 10px 12px;
+    padding: 10px 12px calc(10px + var(--safe-bottom));
   }
 }
 
 @media (max-width: 520px) {
   .studio-header {
-    padding: 0 10px;
+    padding: var(--safe-top) calc(10px + var(--safe-right)) 0 calc(10px + var(--safe-left));
   }
 
   .brand-titles h1 {

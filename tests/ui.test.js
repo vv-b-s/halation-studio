@@ -18,7 +18,9 @@ const MIME_TYPES = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
 };
 
 function startStaticServer() {
@@ -1099,7 +1101,110 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
       assert.equal(afterRefresh.idbStateSample, 'custom');
     });
 
-    await t.test('8. Whole-Project Browser V8 Code Coverage Verification', async () => {
+    await t.test('8. Progressive Web App (PWA) Manifest, Icons, Offline Service Worker & Homescreen Install Flow', async () => {
+      const pwaRes = await browser.evaluate(`
+        const app = window.halationStudio;
+
+        // 1. Verify Web App Manifest link & standalone homescreen meta tags
+        const manifestHref = document.querySelector('link[rel="manifest"]')?.getAttribute('href');
+        const appleCapable = document.querySelector('meta[name="apple-mobile-web-app-capable"]')?.getAttribute('content');
+        const mobileCapable = document.querySelector('meta[name="mobile-web-app-capable"]')?.getAttribute('content');
+        const appleTouchIcon = document.querySelector('link[rel="apple-touch-icon"]')?.getAttribute('href');
+        const viewportContent = document.querySelector('meta[name="viewport"]')?.getAttribute('content') || '';
+
+        const manifestResp = await fetch(manifestHref);
+        const manifestJson = await manifestResp.json();
+
+        // Verify all manifest icons and apple-touch-icon resolve with HTTP 200
+        const iconUrls = [...manifestJson.icons.map(i => i.src), appleTouchIcon];
+        const iconStatuses = await Promise.all(
+          iconUrls.map(async (u) => {
+            const r = await fetch(u);
+            return r.status;
+          })
+        );
+
+        // 2. Verify Service Worker registration & offline cache population
+        const swReg = await app.swRegistrationPromise;
+        await navigator.serviceWorker.ready;
+        const cacheKeys = await caches.keys();
+
+        // 3. Verify beforeinstallprompt -> #install-app-btn click -> appinstalled flow
+        const installBtn = document.getElementById('install-app-btn');
+        let promptCalled = false;
+        const fakeInstallEvt = new Event('beforeinstallprompt', { cancelable: true });
+        fakeInstallEvt.prompt = async () => {
+          promptCalled = true;
+        };
+        fakeInstallEvt.userChoice = Promise.resolve({ outcome: 'accepted' });
+        window.dispatchEvent(fakeInstallEvt);
+        const displayOnPrompt = installBtn.style.display;
+
+        installBtn.click();
+        await new Promise(r => setTimeout(r, 40));
+        const displayAfterAccept = installBtn.style.display;
+
+        // Also fire appinstalled event
+        window.dispatchEvent(new Event('appinstalled'));
+        const toastOnInstalled = document.getElementById('toast-banner').textContent;
+
+        // 4. Verify OS File Handling launchQueue consumer
+        const cLaunch = document.createElement('canvas');
+        cLaunch.width = 40;
+        cLaunch.height = 30;
+        const lctx = cLaunch.getContext('2d');
+        lctx.fillStyle = '#101218';
+        lctx.fillRect(0, 0, 40, 30);
+        const launchBlob = await new Promise(r => cLaunch.toBlob(r, 'image/png'));
+        const launchFile = new File([launchBlob], 'launched_from_homescreen.png', {
+          type: 'image/png',
+        });
+
+        const hasNativeLaunchQueue = Boolean(window.launchQueue && typeof window.launchQueue.setConsumer === 'function');
+        await app._handleLaunchQueueParams({
+          files: [{ getFile: async () => launchFile }],
+        });
+        const launchedFileName = app.originalFileName;
+
+        return {
+          manifestHref,
+          appleCapable,
+          mobileCapable,
+          viewportHasFitCover: viewportContent.includes('viewport-fit=cover'),
+          manifestName: manifestJson.name,
+          manifestShortName: manifestJson.short_name,
+          manifestDisplay: manifestJson.display,
+          manifestIconCount: manifestJson.icons.length,
+          iconStatuses,
+          swRegistered: Boolean(swReg),
+          hasPwaCache: cacheKeys.some(k => k.startsWith('halation-studio-pwa-')),
+          displayOnPrompt,
+          promptCalled,
+          displayAfterAccept,
+          toastOnInstalled,
+          launchedFileName,
+        };
+      `);
+
+      assert.equal(pwaRes.manifestHref, './manifest.webmanifest');
+      assert.equal(pwaRes.appleCapable, 'yes');
+      assert.equal(pwaRes.mobileCapable, 'yes');
+      assert.equal(pwaRes.viewportHasFitCover, true);
+      assert.equal(pwaRes.manifestName, 'Halation Optical Studio');
+      assert.equal(pwaRes.manifestShortName, 'Halation');
+      assert.equal(pwaRes.manifestDisplay, 'standalone');
+      assert.equal(pwaRes.manifestIconCount, 4);
+      assert.deepEqual(pwaRes.iconStatuses, [200, 200, 200, 200, 200]);
+      assert.equal(pwaRes.swRegistered, true);
+      assert.equal(pwaRes.hasPwaCache, true);
+      assert.equal(pwaRes.displayOnPrompt, 'inline-flex');
+      assert.equal(pwaRes.promptCalled, true);
+      assert.equal(pwaRes.displayAfterAccept, 'none');
+      assert.ok(pwaRes.toastOnInstalled.includes('installed to your device'));
+      assert.equal(pwaRes.launchedFileName, 'launched_from_homescreen.png');
+    });
+
+    await t.test('9. Whole-Project Browser V8 Code Coverage Verification', async () => {
       const { result: postReloadCoverage } = await browser.sendCommand('Profiler.takePreciseCoverage');
       const scriptCoverages = [...preReloadCoverage, ...(postReloadCoverage || [])];
       const targetFiles = ['app.js', 'halation-engine.js', 'metadata-utils.js', 'session-cache.js'];

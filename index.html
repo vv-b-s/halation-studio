@@ -2,14 +2,23 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />
   <title>Halation Optical Studio — Analog Film Emulsion &amp; Lossless Photo Processor</title>
   <meta name="description" content="Configure authentic 35mm motion-picture film halation effects with real-time GPU slide toggles and full-resolution lossless photo export." />
   <meta name="theme-color" content="#0b0c0e" />
+  <meta name="application-name" content="Halation Optical Studio" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Halation" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="./assets/icons/icon.svg" />
+  <link rel="icon" type="image/png" sizes="192x192" href="./assets/icons/icon-192.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./assets/icons/apple-touch-icon.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=1.4.0" />
+  <link rel="stylesheet" href="./styles.css?v=1.5.0" />
 </head>
 <body>
   <!-- Studio Header Bar -->
@@ -47,6 +56,14 @@
           <path d="M3 3v5h5" />
         </svg>
         <span class="hide-xs">Reset</span>
+      </button>
+
+      <button type="button" id="install-app-btn" class="btn btn-install" title="Install Halation Optical Studio to your homescreen or desktop" style="display: none;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+          <line x1="12" y1="18" x2="12.01" y2="18" />
+        </svg>
+        <span class="hide-xs">Install App</span>
       </button>
 
       <button type="button" id="header-export-btn" class="btn btn-primary" title="Export full-resolution image without losing quality">
@@ -394,6 +411,6 @@
 
   <div id="toast-banner" class="toast-banner" role="status" aria-live="polite"></div>
 
-  <script type="module" src="./app.js?v=1.4.0"></script>
+  <script type="module" src="./app.js?v=1.5.0"></script>
 </body>
 </html>
