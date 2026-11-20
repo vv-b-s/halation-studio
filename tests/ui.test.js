@@ -1024,10 +1024,10 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
       assert.equal(metaRes.pureHorizWidth, 160);
       assert.equal(metaRes.pureHorizHeight, 90);
 
-      assert.ok(
-        metaRes.fileInputAccept.includes('application/octet-stream') &&
-          !metaRes.fileInputAccept.includes('image/*'),
-        'Expected #file-input accept attribute to include application/octet-stream and omit image/* so mobile browsers bypass the GPS-stripping Photo Picker'
+      assert.equal(
+        metaRes.fileInputAccept,
+        '',
+        'Expected #file-input to omit the accept attribute so mobile browsers do not attach EXTRA_MIME_TYPES image/* filters that trigger OS gallery GPS redaction'
       );
       assert.ok(metaRes.gpsBadgeText.includes('GPS'), 'Expected metadata badge to indicate GPS tag detected');
       assert.equal(metaRes.gpsPreviewFilename, 'PXL_20260514_192210.jpg');

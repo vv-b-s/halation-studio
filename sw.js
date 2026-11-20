@@ -1,4 +1,4 @@
-const CACHE_NAME = 'halation-studio-pwa-v1.6.0';
+const CACHE_NAME = 'halation-studio-pwa-v1.7.0';
 
 const PRECACHE_ASSETS = [
   './',
@@ -52,13 +52,13 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
 
-  // Same-origin requests: Network-first for HTML/JS/CSS/manifest (always fresh online, full offline fallback)
+  // Same-origin requests: Network-first bypassing browser HTTP cache so updates appear immediately online, with full offline fallback
   if (url.origin === self.location.origin) {
     event.respondWith(
       (async () => {
         const cache = await caches.open(CACHE_NAME);
         try {
-          const networkResponse = await fetch(request);
+          const networkResponse = await fetch(request, { cache: 'no-cache' });
           if (networkResponse && networkResponse.ok) {
             cache.put(request, networkResponse.clone());
           }

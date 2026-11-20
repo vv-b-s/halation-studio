@@ -10,11 +10,13 @@
 const DB_NAME = 'HalationStudioCacheDB';
 const DB_VERSION = 1;
 const STORE_NAME = 'sessionStore';
-const IMAGE_KEY = 'lastUploadedImage';
+const IMAGE_KEY = 'lastUploadedImage_v2';
+const LEGACY_IMAGE_KEY = 'lastUploadedImage';
 const STATE_KEY = 'studioState';
 
 const LS_STATE_KEY = 'halation_studio_state_v1';
-const LS_IMAGE_KEY = 'halation_studio_image_v1';
+const LS_IMAGE_KEY = 'halation_studio_image_v2';
+const LEGACY_LS_IMAGE_KEY = 'halation_studio_image_v1';
 const MAX_LS_IMAGE_BYTES = 2 * 1024 * 1024; // 2 MB fallback threshold for localStorage
 
 function openCacheDB() {
@@ -158,6 +160,13 @@ export async function saveUploadedImageToCache(fileOrRecord, rawBytes) {
  * Returns { name, type, lastModified, bytes: Uint8Array, file: File } or null.
  */
 export async function loadUploadedImageFromCache() {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(LEGACY_LS_IMAGE_KEY);
+    }
+  } catch (_) {}
+  idbDelete(LEGACY_IMAGE_KEY).catch(() => {});
+
   let record = null;
   try {
     record = await idbGet(IMAGE_KEY);
@@ -266,10 +275,12 @@ export async function clearStudioCache() {
     if (typeof localStorage !== 'undefined') {
       localStorage.removeItem(LS_STATE_KEY);
       localStorage.removeItem(LS_IMAGE_KEY);
+      localStorage.removeItem(LEGACY_LS_IMAGE_KEY);
     }
   } catch (_) {}
   try {
     await idbDelete(IMAGE_KEY);
+    await idbDelete(LEGACY_IMAGE_KEY);
     await idbDelete(STATE_KEY);
   } catch (_) {}
 }

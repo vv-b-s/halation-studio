@@ -722,7 +722,59 @@ test('Fujifilm DSCF0141.JPG geolocation edge cases: 0/0 uninitialized GPS templa
   assert.ok(Math.abs(parsedDmsSec.latitude - 35.6585) < 0.0001);
   assert.ok(Math.abs(parsedDmsSec.longitude - 139.7015) < 0.0001);
   assert.equal(parsedDmsSec.altitude, -44.5);
+
+  // 5. Test NMEA degrees + decimal minutes EXIF GPS where the 3rd rational (Seconds) is 0/0
+  const nmeaTiff = buildExifTiffPayload({
+    title: 'NMEA Decimal Minutes',
+    make: 'FUJIFILM',
+    model: 'X-T5',
+    gps: { latitude: 42.6977, longitude: 23.3219, altitude: 550 },
+  });
+  // Overwrite the 3rd rational (seconds, 8 bytes) of latitude and longitude with 0/0
+  // In buildExifTiffPayload, lat is at gpsIfdEnd - 56 (deg:0..7, min:8..15, sec:16..23) and lon is at gpsIfdEnd - 32 (deg:24..31, min:32..39, sec:40..47)
+  const nmeaZeroSecTiff = nmeaTiff.slice();
+  const gpsDataStart = nmeaZeroSecTiff.length - 56;
+  const nmeaView = new DataView(nmeaZeroSecTiff.buffer);
+  // Set lat minutes to 418620/10000 (41.862') and lat seconds to 0/0
+  nmeaView.setUint32(gpsDataStart + 8, 418620, true);
+  nmeaView.setUint32(gpsDataStart + 12, 10000, true);
+  nmeaView.setUint32(gpsDataStart + 16, 0, true);
+  nmeaView.setUint32(gpsDataStart + 20, 0, true);
+  // Set lon minutes to 193140/10000 (19.314') and lon seconds to 0/0
+  nmeaView.setUint32(gpsDataStart + 32, 193140, true);
+  nmeaView.setUint32(gpsDataStart + 36, 10000, true);
+  nmeaView.setUint32(gpsDataStart + 40, 0, true);
+  nmeaView.setUint32(gpsDataStart + 44, 0, true);
+
+  const parsedNmea = parseExifGps(nmeaZeroSecTiff);
+  assert.ok(parsedNmea, 'parseExifGps must decode NMEA degrees+decimal-minutes even when seconds rational is 0/0');
+  assert.ok(Math.abs(parsedNmea.latitude - 42.6977) < 0.0001);
+  assert.ok(Math.abs(parsedNmea.longitude - 23.3219) < 0.0001);
+
+  // 6. Test 64 KB-padded camera APP1 EXIF segment (padded with trailing 0x00 bytes up to 65520 bytes)
+  const padded64kTiff = new Uint8Array(65500);
+  padded64kTiff.set(zeroedTemplateTiff, 0);
+  const injected64k = ensureExifGpsInTiff(padded64kTiff, {
+    latitude: 42.6977,
+    longitude: 23.3219,
+    altitude: 550,
+  });
+  const parsed64k = parseExifGps(injected64k, { ifd0Only: true });
+  assert.ok(parsed64k, 'ensureExifGpsInTiff must trim trailing 0x00 padding so 64 KB camera APP1 segments preserve GPS');
+  assert.ok(Math.abs(parsed64k.latitude - 42.6977) < 0.0001);
+  assert.ok(Math.abs(parsed64k.longitude - 23.3219) < 0.0001);
+
+  // 7. Test OS MediaProvider GPS redaction detection (gpsRedactedByOs = true when 0x8825 exists with zeroed coordinates and no XMP fallback)
+  const osRedactedJpeg = new Uint8Array([
+    0xff, 0xd8,
+    ...app1ZeroedExif,
+    ...createMinimalJpegBytes().subarray(2),
+  ]);
+  const redactedMeta = extractImageMetadata(osRedactedJpeg, 'image/jpeg', 'DSCF0141.JPG');
+  assert.equal(redactedMeta.hasGps, false);
+  assert.equal(redactedMeta.gpsRedactedByOs, true);
 });
+
 
 
 

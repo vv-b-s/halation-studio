@@ -92,13 +92,19 @@ test('session-cache saves, loads, and clears uploaded images and studio state vi
       lastModified: 1711111111000,
     });
 
+    // Seed legacy v1 keys to verify loadUploadedImageFromCache purges stale GPS-redacted v1 cache entries
+    idbMap.set('lastUploadedImage', { name: 'stale.jpg' });
+    lsMap.set('halation_studio_image_v1', '{"name":"stale.jpg"}');
+
     const savedImg = await saveUploadedImageToCache(fakeFile, sampleBytes);
     assert.equal(savedImg, true);
-    assert.ok(idbMap.has('lastUploadedImage'));
-    assert.ok(lsMap.has('halation_studio_image_v1'));
+    assert.ok(idbMap.has('lastUploadedImage_v2'));
+    assert.ok(lsMap.has('halation_studio_image_v2'));
 
     const loadedImg = await loadUploadedImageFromCache();
     assert.ok(loadedImg);
+    assert.equal(idbMap.has('lastUploadedImage'), false);
+    assert.equal(lsMap.has('halation_studio_image_v1'), false);
     assert.equal(loadedImg.name, 'Night_Roll_04.jpg');
     assert.equal(loadedImg.type, 'image/jpeg');
     assert.equal(loadedImg.lastModified, 1711111111000);

@@ -277,13 +277,35 @@ export function parseExifGps(tiffBytes, { ifd0Only = false } = {}) {
     return num / den;
   };
 
+  const isZeroZeroRational = (off) => {
+    if (off + 8 > tiffBytes.length) return false;
+    return read32(off) === 0 && read32(off + 4) === 0;
+  };
+
   const readCoordRationals = (off, count, isSigned) => {
     if (count < 1 || off + count * 8 > tiffBytes.length) return null;
     const d = readRational(off, isSigned);
     if (d === null) return null;
-    const m = count >= 2 ? readRational(off + 8, isSigned) : 0;
-    const s = count >= 3 ? readRational(off + 16, isSigned) : 0;
-    if (m === null || s === null) return null;
+    let m = 0;
+    if (count >= 2) {
+      const mVal = readRational(off + 8, isSigned);
+      if (mVal === null) {
+        if (!isZeroZeroRational(off + 8)) return null;
+        m = 0;
+      } else {
+        m = mVal;
+      }
+    }
+    let s = 0;
+    if (count >= 3) {
+      const sVal = readRational(off + 16, isSigned);
+      if (sVal === null) {
+        if (!isZeroZeroRational(off + 16)) return null;
+        s = 0;
+      } else {
+        s = sVal;
+      }
+    }
     const sign = d < 0 ? -1 : 1;
     return sign * (Math.abs(d) + Math.abs(m) / 60 + Math.abs(s) / 3600);
   };
@@ -371,6 +393,53 @@ export function parseExifGps(tiffBytes, { ifd0Only = false } = {}) {
   }
 
   return null;
+}
+
+/**
+ * Detects whether a raw EXIF TIFF buffer contains a GPSInfo (0x8825) Sub-IFD pointer
+ * whose coordinate tags (0x0002 / 0x0004) or entry table were zeroed out / redacted
+ * by an OS photo picker or MediaProvider (such as Android's ExifRedactor).
+ */
+export function hasRedactedExifGpsIfd(tiffBytes) {
+  if (!tiffBytes || tiffBytes.length < 8) return false;
+  if (parseExifGps(tiffBytes)) return false;
+
+  const endian = bytesToAscii(tiffBytes, 0, 2);
+  const le = endian === 'II';
+  if (!le && endian !== 'MM') return false;
+
+  const read16 = (off) =>
+    le
+      ? (tiffBytes[off] | (tiffBytes[off + 1] << 8)) >>> 0
+      : ((tiffBytes[off] << 8) | tiffBytes[off + 1]) >>> 0;
+  const read32 = (off) =>
+    le ? readU32LE(tiffBytes, off) : readU32BE(tiffBytes, off);
+  const readPtr = (entryOffset) => {
+    const type = read16(entryOffset + 2);
+    return type === 3 ? read16(entryOffset + 8) : read32(entryOffset + 8);
+  };
+
+  if (read16(2) !== 42) return false;
+  const ifd0Offset = read32(4);
+  if (ifd0Offset + 2 > tiffBytes.length) return false;
+  const numEntries = read16(ifd0Offset);
+  if (numEntries > 256 || ifd0Offset + 2 + numEntries * 12 > tiffBytes.length) return false;
+
+  for (let i = 0; i < numEntries; i++) {
+    const entryOffset = ifd0Offset + 2 + i * 12;
+    if (read16(entryOffset) === 0x8825) {
+      const gpsOff = readPtr(entryOffset);
+      if (gpsOff > 0 && gpsOff + 2 <= tiffBytes.length) {
+        const numGps = read16(gpsOff);
+        // Either the entire GPS IFD was overwritten with zeros (numGps === 0)
+        // or the coordinate entries inside it were zeroed out (parseExifGps returned null)
+        if (numGps >= 0 && numGps <= 64) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -871,11 +940,20 @@ export function ensureExifGpsInTiff(tiffBytes, gps) {
     return block;
   };
 
+  // Trim trailing zero padding if appending the GPS block would exceed the 64 KB APP1 limit (0xfff7)
+  let baseLen = tiffBytes.length;
+  const minEnd = ifd0Offset + 2 + numEntries0 * 12 + 4;
+  if (((baseLen + 1) & ~1) + totalGpsLen + 2 + (numEntries0 + 1) * 12 + 4 > 0xfff7) {
+    while (baseLen > minEnd && tiffBytes[baseLen - 1] === 0) {
+      baseLen--;
+    }
+  }
+
   if (existingGpsEntryOff >= 0) {
-    const gpsBaseOffset = (tiffBytes.length + 1) & ~1;
+    const gpsBaseOffset = (baseLen + 1) & ~1;
     if (gpsBaseOffset + totalGpsLen > 0xfff7) return tiffBytes;
     const out = new Uint8Array(gpsBaseOffset + totalGpsLen);
-    out.set(tiffBytes, 0);
+    out.set(tiffBytes.subarray(0, baseLen), 0);
     out.set(buildGpsBlockAt(gpsBaseOffset), gpsBaseOffset);
     write16(out, existingGpsEntryOff + 2, 4);
     write32(out, existingGpsEntryOff + 4, 1);
@@ -884,14 +962,14 @@ export function ensureExifGpsInTiff(tiffBytes, gps) {
   }
 
   // Relocate IFD0 to end of TIFF buffer with added 0x8825 entry so zero existing offsets shift
-  const newIfd0Offset = (tiffBytes.length + 1) & ~1;
+  const newIfd0Offset = (baseLen + 1) & ~1;
   const newNumEntries = numEntries0 + 1;
   const newIfd0Size = 2 + newNumEntries * 12 + 4;
   const gpsBaseOffset = newIfd0Offset + newIfd0Size;
   if (gpsBaseOffset + totalGpsLen > 0xfff7) return tiffBytes;
 
   const out = new Uint8Array(gpsBaseOffset + totalGpsLen);
-  out.set(tiffBytes, 0);
+  out.set(tiffBytes.subarray(0, baseLen), 0);
   write32(out, 4, newIfd0Offset);
   write16(out, newIfd0Offset, newNumEntries);
 
@@ -1013,6 +1091,7 @@ export function extractImageMetadata(buffer, mimeHint = '', fileName = '') {
     hasMetadata: false,
     hasGps: false,
     gps: null,
+    gpsRedactedByOs: false,
     tagsSummary: [],
     jpegSegments: [],
     pngChunks: [],
@@ -1021,6 +1100,8 @@ export function extractImageMetadata(buffer, mimeHint = '', fileName = '') {
     rawXmp: null,
     rawIcc: null,
   };
+
+  let sawRedactedGpsIfd = false;
 
   const addTag = (tag) => {
     if (!bundle.tagsSummary.includes(tag)) bundle.tagsSummary.push(tag);
@@ -1041,6 +1122,8 @@ export function extractImageMetadata(buffer, mimeHint = '', fileName = '') {
       bundle.hasGps = true;
       bundle.gps = gpsInfo;
       addTag('GPS');
+    } else if (hasRedactedExifGpsIfd(tiffSlice)) {
+      sawRedactedGpsIfd = true;
     }
   };
 
@@ -1235,6 +1318,10 @@ export function extractImageMetadata(buffer, mimeHint = '', fileName = '') {
     bundle.title = cleanFileTitle;
   }
 
+  if (!bundle.hasGps && sawRedactedGpsIfd) {
+    bundle.gpsRedactedByOs = true;
+  }
+
   bundle.orientation = bundle.rawExifTiff ? parseExifOrientation(bundle.rawExifTiff) : 1;
 
   return bundle;
@@ -1376,7 +1463,8 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
 
     if (metadataBundle.jpegSegments && metadataBundle.jpegSegments.length > 0) {
       let hasExifApp1 = false;
-      const exifApp1Segments = [];
+      const exifApp1WithGps = [];
+      const exifApp1WithoutGps = [];
       const otherSegments = [];
 
       for (const seg of metadataBundle.jpegSegments) {
@@ -1401,7 +1489,11 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
             );
             const built =
               createJpegSegment(0xe1, concatUint8Arrays([EXIF_HEADER, normTiff])) || seg;
-            exifApp1Segments.push(built);
+            if (parseExifGps(normTiff, { ifd0Only: true })) {
+              exifApp1WithGps.push(built);
+            } else {
+              exifApp1WithoutGps.push(built);
+            }
             continue;
           }
           if (startsWithBytes(payload, xmpPrefix)) {
@@ -1421,11 +1513,11 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
           metadataBundle.gps
         );
         const seg = createJpegSegment(0xe1, concatUint8Arrays([EXIF_HEADER, normTiff]));
-        if (seg) exifApp1Segments.push(seg);
+        if (seg) exifApp1WithGps.push(seg);
       }
 
-      // Place APP1 Exif segment(s) first right after SOI (0xFF 0xD8) per Exif 2.32 Section 4.5.4
-      segmentsToInject = [...exifApp1Segments, ...otherSegments];
+      // Place GPS-bearing APP1 Exif segment(s) first right after SOI (0xFF 0xD8) per Exif 2.32 Section 4.5.4
+      segmentsToInject = [...exifApp1WithGps, ...exifApp1WithoutGps, ...otherSegments];
     } else {
       if ((metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) || metadataBundle.gps) {
         const normTiff = ensureExifGpsInTiff(

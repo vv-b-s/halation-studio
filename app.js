@@ -1,15 +1,15 @@
-import { HalationEngine, DEFAULT_PARAMS, PRESETS } from './halation-engine.js?v=1.6.0';
+import { HalationEngine, DEFAULT_PARAMS, PRESETS } from './halation-engine.js?v=1.7.0';
 import {
   extractImageMetadata,
   processExportBlobMetadata,
   getExactExportFilename,
-} from './metadata-utils.js?v=1.6.0';
+} from './metadata-utils.js?v=1.7.0';
 import {
   saveUploadedImageToCache,
   loadUploadedImageFromCache,
   saveStudioStateToCache,
   loadStudioStateFromCache,
-} from './session-cache.js?v=1.6.0';
+} from './session-cache.js?v=1.7.0';
 
 const BUILTIN_SAMPLES = {
   example1: {
@@ -330,12 +330,24 @@ export class HalationStudioApp {
     if (this.params.stripMetadata) {
       badge.textContent = 'Metadata Stripped';
       badge.className = 'metadata-badge stripped';
+      badge.title = 'All EXIF, GPS, XMP, and ICC metadata will be removed on export';
+    } else if (this.currentMetadata?.gpsRedactedByOs) {
+      const tags = this.currentMetadata?.tagsSummary?.length
+        ? ` (${this.currentMetadata.tagsSummary.join('•')})`
+        : '';
+      badge.textContent = `Metadata Preserved${tags} • OS Redacted GPS`;
+      badge.className = 'metadata-badge stripped';
+      badge.title =
+        'Your phone gallery redacted GPS coordinates before passing the file to the browser. To keep GPS on Android/iOS, tap Open Photo → browse via ☰ Files / Internal Storage / DCIM.';
     } else {
       const tags = this.currentMetadata?.tagsSummary?.length
         ? ` (${this.currentMetadata.tagsSummary.join('•')})`
         : '';
       badge.textContent = `Metadata Preserved${tags}`;
       badge.className = 'metadata-badge preserved';
+      badge.title = this.currentMetadata?.gps
+        ? `GPS preserved: ${this.currentMetadata.gps.latitude}, ${this.currentMetadata.gps.longitude}`
+        : 'Original metadata preserved on export';
     }
   }
 
@@ -715,7 +727,7 @@ export class HalationStudioApp {
   }
 
   _initPwaSupport() {
-    // 1. Register offline-capable Service Worker
+    // 1. Register offline-capable Service Worker & check for updates immediately
     if (
       'serviceWorker' in navigator &&
       (location.protocol === 'https:' ||
@@ -723,7 +735,13 @@ export class HalationStudioApp {
         location.hostname === '127.0.0.1')
     ) {
       this.swRegistrationPromise = navigator.serviceWorker
-        .register('./sw.js', { scope: './' })
+        .register('./sw.js?v=1.7.0', { scope: './' })
+        .then((reg) => {
+          if (reg && typeof reg.update === 'function') {
+            reg.update().catch(() => {});
+          }
+          return reg;
+        })
         .catch(() => null);
     }
 
@@ -930,12 +948,18 @@ export class HalationStudioApp {
       }
       await this._persistState();
 
-      const metaNote = metadata.tagsSummary.length
-        ? ` • ${metadata.tagsSummary.join('+')} metadata detected`
-        : '';
-      this.showToast(
-        `${fromCache ? 'Restored' : 'Loaded'} "${this.originalFileName}" (${this.fullResImage.naturalWidth} × ${this.fullResImage.naturalHeight} px${metaNote})`
-      );
+      if (metadata.gpsRedactedByOs) {
+        this.showToast(
+          `Loaded "${this.originalFileName}" — OS gallery stripped GPS; pick via ☰ Files / DCIM to keep GPS`
+        );
+      } else {
+        const metaNote = metadata.tagsSummary.length
+          ? ` • ${metadata.tagsSummary.join('+')} metadata detected`
+          : '';
+        this.showToast(
+          `${fromCache ? 'Restored' : 'Loaded'} "${this.originalFileName}" (${this.fullResImage.naturalWidth} × ${this.fullResImage.naturalHeight} px${metaNote})`
+        );
+      }
     })();
 
     this._activeLoadPromise = task;
