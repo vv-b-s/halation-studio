@@ -1,15 +1,15 @@
-import { HalationEngine, DEFAULT_PARAMS, PRESETS } from './halation-engine.js?v=1.5.0';
+import { HalationEngine, DEFAULT_PARAMS, PRESETS } from './halation-engine.js?v=1.6.0';
 import {
   extractImageMetadata,
   processExportBlobMetadata,
   getExactExportFilename,
-} from './metadata-utils.js?v=1.5.0';
+} from './metadata-utils.js?v=1.6.0';
 import {
   saveUploadedImageToCache,
   loadUploadedImageFromCache,
   saveStudioStateToCache,
   loadStudioStateFromCache,
-} from './session-cache.js?v=1.5.0';
+} from './session-cache.js?v=1.6.0';
 
 const BUILTIN_SAMPLES = {
   example1: {

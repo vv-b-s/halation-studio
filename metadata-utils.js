@@ -214,10 +214,11 @@ function parseXmpTitle(xmpBytes) {
 }
 
 /**
- * Parses IFD0 and the GPSInfo Sub-IFD (tag 0x8825) of a raw EXIF TIFF buffer
+ * Parses IFD0 (and ExifSubIFD fallback) and the GPSInfo Sub-IFD (tag 0x8825) of a raw EXIF TIFF buffer
  * to detect and decode GPS coordinates (latitude, longitude, altitude).
+ * Rejects uninitialized or OS-redacted 0/0 rational templates.
  */
-export function parseExifGps(tiffBytes) {
+export function parseExifGps(tiffBytes, { ifd0Only = false } = {}) {
   if (!tiffBytes || tiffBytes.length < 8) return null;
   const endian = bytesToAscii(tiffBytes, 0, 2);
   const le = endian === 'II';
@@ -229,6 +230,10 @@ export function parseExifGps(tiffBytes) {
       : ((tiffBytes[off] << 8) | tiffBytes[off + 1]) >>> 0;
   const read32 = (off) =>
     le ? readU32LE(tiffBytes, off) : readU32BE(tiffBytes, off);
+  const readPtr = (entryOffset) => {
+    const type = read16(entryOffset + 2);
+    return type === 3 ? read16(entryOffset + 8) : read32(entryOffset + 8);
+  };
 
   if (read16(2) !== 42) return null;
   const ifd0Offset = read32(4);
@@ -237,86 +242,173 @@ export function parseExifGps(tiffBytes) {
   const numEntries = read16(ifd0Offset);
   if (numEntries > 256 || ifd0Offset + 2 + numEntries * 12 > tiffBytes.length) return null;
 
-  let gpsIfdOffset = 0;
+  const candidateGpsOffsets = [];
+  let exifSubIfdOffset = 0;
+
   for (let i = 0; i < numEntries; i++) {
     const entryOffset = ifd0Offset + 2 + i * 12;
     const tag = read16(entryOffset);
     if (tag === 0x8825) {
-      gpsIfdOffset = read32(entryOffset + 8);
-      break;
+      candidateGpsOffsets.push(readPtr(entryOffset));
+    } else if (tag === 0x8769) {
+      exifSubIfdOffset = readPtr(entryOffset);
     }
   }
 
-  if (!gpsIfdOffset || gpsIfdOffset + 2 > tiffBytes.length) return null;
-  const numGpsEntries = read16(gpsIfdOffset);
-  if (numGpsEntries === 0 || numGpsEntries > 64 || gpsIfdOffset + 2 + numGpsEntries * 12 > tiffBytes.length) {
-    return null;
+  if (!ifd0Only && exifSubIfdOffset > 0 && exifSubIfdOffset + 2 <= tiffBytes.length) {
+    const subEntries = read16(exifSubIfdOffset);
+    if (subEntries > 0 && subEntries <= 256 && exifSubIfdOffset + 2 + subEntries * 12 <= tiffBytes.length) {
+      for (let i = 0; i < subEntries; i++) {
+        const entryOffset = exifSubIfdOffset + 2 + i * 12;
+        if (read16(entryOffset) === 0x8825) {
+          candidateGpsOffsets.push(readPtr(entryOffset));
+        }
+      }
+    }
   }
 
-  let latRef = '';
-  let lonRef = '';
-  let altRef = 0;
-  let latVal = null;
-  let lonVal = null;
-  let altVal = null;
-
-  const readRational = (off) => {
+  const readRational = (off, isSigned = false) => {
     if (off + 8 > tiffBytes.length) return null;
-    const num = read32(off);
-    const den = read32(off + 4);
-    return den !== 0 ? num / den : 0;
+    const rawNum = read32(off);
+    const rawDen = read32(off + 4);
+    const num = isSigned ? rawNum | 0 : rawNum;
+    const den = isSigned ? rawDen | 0 : rawDen;
+    if (den === 0) return null;
+    return num / den;
   };
 
-  const readDmsRationals = (off) => {
-    if (off + 24 > tiffBytes.length) return null;
-    const d = readRational(off);
-    const m = readRational(off + 8);
-    const s = readRational(off + 16);
-    if (d === null || m === null || s === null) return null;
-    return d + m / 60 + s / 3600;
+  const readCoordRationals = (off, count, isSigned) => {
+    if (count < 1 || off + count * 8 > tiffBytes.length) return null;
+    const d = readRational(off, isSigned);
+    if (d === null) return null;
+    const m = count >= 2 ? readRational(off + 8, isSigned) : 0;
+    const s = count >= 3 ? readRational(off + 16, isSigned) : 0;
+    if (m === null || s === null) return null;
+    const sign = d < 0 ? -1 : 1;
+    return sign * (Math.abs(d) + Math.abs(m) / 60 + Math.abs(s) / 3600);
   };
 
-  for (let i = 0; i < numGpsEntries; i++) {
-    const entryOffset = gpsIfdOffset + 2 + i * 12;
-    const tag = read16(entryOffset);
-    const type = read16(entryOffset + 2);
-    const count = read32(entryOffset + 4);
-    const valOffset = read32(entryOffset + 8);
-
-    if (tag === 0x0001 && type === 2 && count >= 1) {
-      latRef = String.fromCharCode(tiffBytes[entryOffset + 8]).toUpperCase();
-    } else if (tag === 0x0002 && (type === 5 || type === 10) && count === 3) {
-      latVal = readDmsRationals(valOffset);
-    } else if (tag === 0x0003 && type === 2 && count >= 1) {
-      lonRef = String.fromCharCode(tiffBytes[entryOffset + 8]).toUpperCase();
-    } else if (tag === 0x0004 && (type === 5 || type === 10) && count === 3) {
-      lonVal = readDmsRationals(valOffset);
-    } else if (tag === 0x0005 && type === 1 && count >= 1) {
-      altRef = tiffBytes[entryOffset + 8];
-    } else if (tag === 0x0006 && (type === 5 || type === 10) && count === 1) {
-      altVal = readRational(valOffset);
+  const decodeGpsIfd = (gpsIfdOffset) => {
+    if (!gpsIfdOffset || gpsIfdOffset + 2 > tiffBytes.length) return null;
+    const numGpsEntries = read16(gpsIfdOffset);
+    if (
+      numGpsEntries === 0 ||
+      numGpsEntries > 64 ||
+      gpsIfdOffset + 2 + numGpsEntries * 12 > tiffBytes.length
+    ) {
+      return null;
     }
-  }
 
-  if (latVal !== null && lonVal !== null) {
-    const signedLat = latRef === 'S' ? -latVal : latVal;
-    const signedLon = lonRef === 'W' ? -lonVal : lonVal;
+    let latRef = '';
+    let lonRef = '';
+    let altRef = 0;
+    let latVal = null;
+    let lonVal = null;
+    let altVal = null;
+
+    for (let i = 0; i < numGpsEntries; i++) {
+      const entryOffset = gpsIfdOffset + 2 + i * 12;
+      const tag = read16(entryOffset);
+      const type = read16(entryOffset + 2);
+      const count = read32(entryOffset + 4);
+      const valOffset = readPtr(entryOffset);
+
+      if (tag === 0x0001 && (type === 1 || type === 2 || type === 7) && count >= 1) {
+        const charOff = count <= 4 ? entryOffset + 8 : valOffset;
+        if (charOff < tiffBytes.length) {
+          const ch = String.fromCharCode(tiffBytes[charOff]).toUpperCase();
+          if (ch === 'N' || ch === 'S') latRef = ch;
+        }
+      } else if (tag === 0x0002 && (type === 5 || type === 10) && count >= 1 && count <= 3) {
+        const coordOff = count * 8 <= 4 ? entryOffset + 8 : valOffset;
+        latVal = readCoordRationals(coordOff, count, type === 10);
+      } else if (tag === 0x0003 && (type === 1 || type === 2 || type === 7) && count >= 1) {
+        const charOff = count <= 4 ? entryOffset + 8 : valOffset;
+        if (charOff < tiffBytes.length) {
+          const ch = String.fromCharCode(tiffBytes[charOff]).toUpperCase();
+          if (ch === 'E' || ch === 'W') lonRef = ch;
+        }
+      } else if (tag === 0x0004 && (type === 5 || type === 10) && count >= 1 && count <= 3) {
+        const coordOff = count * 8 <= 4 ? entryOffset + 8 : valOffset;
+        lonVal = readCoordRationals(coordOff, count, type === 10);
+      } else if (tag === 0x0005 && (type === 1 || type === 2 || type === 3) && count >= 1) {
+        altRef = tiffBytes[entryOffset + 8] === 1 ? 1 : 0;
+      } else if (tag === 0x0006 && (type === 5 || type === 10) && count === 1) {
+        altVal = readRational(valOffset, type === 10);
+      }
+    }
+
+    if (latVal === null || lonVal === null) return null;
+    // Reject uninitialized 0,0 templates when N/S/E/W reference chars are missing
+    if (latVal === 0 && lonVal === 0 && (!latRef || !lonRef)) return null;
+
+    const signedLat = latRef === 'S' ? -Math.abs(latVal) : latRef === 'N' ? Math.abs(latVal) : latVal;
+    const signedLon = lonRef === 'W' ? -Math.abs(lonVal) : lonRef === 'E' ? Math.abs(lonVal) : lonVal;
+    if (
+      Number.isNaN(signedLat) ||
+      Number.isNaN(signedLon) ||
+      Math.abs(signedLat) > 90 ||
+      Math.abs(signedLon) > 180
+    ) {
+      return null;
+    }
+
     return {
       latitude: Number(signedLat.toFixed(6)),
       longitude: Number(signedLon.toFixed(6)),
       latitudeRef: latRef || (signedLat < 0 ? 'S' : 'N'),
       longitudeRef: lonRef || (signedLon < 0 ? 'W' : 'E'),
-      altitude: altVal !== null ? Number((altRef === 1 ? -altVal : altVal).toFixed(2)) : null,
+      altitude:
+        altVal !== null && !Number.isNaN(altVal)
+          ? Number((altRef === 1 ? -Math.abs(altVal) : altVal).toFixed(2))
+          : null,
     };
+  };
+
+  for (const off of candidateGpsOffsets) {
+    const parsed = decodeGpsIfd(off);
+    if (parsed) return parsed;
   }
 
   return null;
 }
 
 /**
- * Parses XMP bytes for exif:GPSLatitude and exif:GPSLongitude tags.
+ * Parses an XMP GPS coordinate string (e.g. "37,49.194N", "37,49,11.64N", "-122.4783", "122,28.698W")
+ * into a signed decimal degree number.
  */
-function parseXmpGps(xmpBytes) {
+function parseXmpCoordinate(rawStr) {
+  if (!rawStr || typeof rawStr !== 'string') return null;
+  const s = rawStr.trim();
+  if (!s) return null;
+
+  const dirMatch = s.match(/([NSEW])$/i);
+  const dir = dirMatch ? dirMatch[1].toUpperCase() : '';
+  const body = dirMatch ? s.slice(0, -1).trim() : s;
+  const parts = body.split(',').map((p) => Number(p.trim()));
+  if (parts.some((n) => Number.isNaN(n))) return null;
+
+  let val = 0;
+  if (parts.length === 1) {
+    val = parts[0];
+  } else if (parts.length === 2) {
+    const sign = parts[0] < 0 ? -1 : 1;
+    val = sign * (Math.abs(parts[0]) + Math.abs(parts[1]) / 60);
+  } else if (parts.length >= 3) {
+    const sign = parts[0] < 0 ? -1 : 1;
+    val = sign * (Math.abs(parts[0]) + Math.abs(parts[1]) / 60 + Math.abs(parts[2]) / 3600);
+  }
+
+  if (dir === 'S' || dir === 'W') val = -Math.abs(val);
+  else if (dir === 'N' || dir === 'E') val = Math.abs(val);
+
+  return Number.isNaN(val) ? null : Number(val.toFixed(6));
+}
+
+/**
+ * Parses XMP bytes for exif:GPSLatitude, exif:GPSLongitude, and exif:GPSAltitude tags.
+ */
+export function parseXmpGps(xmpBytes) {
   if (!xmpBytes || xmpBytes.length === 0) return null;
   const xml = textDecoder.decode(xmpBytes);
   const latMatch =
@@ -325,10 +417,55 @@ function parseXmpGps(xmpBytes) {
   const lonMatch =
     xml.match(/exif:GPSLongitude\s*=\s*["']([^"']+)["']/i) ||
     xml.match(/<exif:GPSLongitude>\s*([^<]+)\s*<\/exif:GPSLongitude>/i);
-  if (latMatch && lonMatch) {
-    return { rawLatitude: latMatch[1].trim(), rawLongitude: lonMatch[1].trim() };
+  if (!latMatch || !lonMatch) return null;
+
+  const rawLatitude = latMatch[1].trim();
+  const rawLongitude = lonMatch[1].trim();
+  const latitude = parseXmpCoordinate(rawLatitude);
+  const longitude = parseXmpCoordinate(rawLongitude);
+  if (
+    latitude === null ||
+    longitude === null ||
+    Math.abs(latitude) > 90 ||
+    Math.abs(longitude) > 180
+  ) {
+    return null;
   }
-  return null;
+
+  let altitude = null;
+  const altMatch =
+    xml.match(/exif:GPSAltitude\s*=\s*["']([^"']+)["']/i) ||
+    xml.match(/<exif:GPSAltitude>\s*([^<]+)\s*<\/exif:GPSAltitude>/i);
+  const altRefMatch =
+    xml.match(/exif:GPSAltitudeRef\s*=\s*["']([^"']+)["']/i) ||
+    xml.match(/<exif:GPSAltitudeRef>\s*([^<]+)\s*<\/exif:GPSAltitudeRef>/i);
+  if (altMatch) {
+    const rawAlt = altMatch[1].trim();
+    const slashIdx = rawAlt.indexOf('/');
+    let parsedAlt = null;
+    if (slashIdx > 0) {
+      const num = Number(rawAlt.slice(0, slashIdx));
+      const den = Number(rawAlt.slice(slashIdx + 1));
+      if (!Number.isNaN(num) && !Number.isNaN(den) && den !== 0) parsedAlt = num / den;
+    } else {
+      const n = Number(rawAlt);
+      if (!Number.isNaN(n)) parsedAlt = n;
+    }
+    if (parsedAlt !== null) {
+      const belowSea = altRefMatch && altRefMatch[1].trim() === '1';
+      altitude = Number((belowSea ? -Math.abs(parsedAlt) : parsedAlt).toFixed(2));
+    }
+  }
+
+  return {
+    latitude,
+    longitude,
+    latitudeRef: latitude < 0 ? 'S' : 'N',
+    longitudeRef: longitude < 0 ? 'W' : 'E',
+    altitude,
+    rawLatitude,
+    rawLongitude,
+  };
 }
 
 /**
@@ -569,9 +706,9 @@ export function normalizeExifOrientation(tiffBytes) {
     } else if (tag === 0x0101 && isScalarEntry(entryOffset)) {
       heightEntryPos = entryOffset;
     } else if (tag === 0x8769) {
-      exifSubIfdOffset = read32(entryOffset + 8);
+      exifSubIfdOffset = readScalarEntry(entryOffset);
     } else if (tag === 0x8825) {
-      gpsIfdOffset = read32(entryOffset + 8);
+      gpsIfdOffset = readScalarEntry(entryOffset);
     }
   }
 
@@ -605,28 +742,188 @@ export function normalizeExifOrientation(tiffBytes) {
     }
   }
 
-  // Also normalize IFD1 (thumbnail IFD) orientation if present and valid (never touching GPSInfo or ExifSubIFD)
-  const nextIfdPtrPos = ifd0Offset + 2 + numEntries0 * 12;
-  if (nextIfdPtrPos + 4 <= out.length) {
-    const ifd1Offset = read32(nextIfdPtrPos);
-    if (
-      ifd1Offset > 0 &&
-      ifd1Offset !== gpsIfdOffset &&
-      ifd1Offset !== exifSubIfdOffset &&
-      ifd1Offset + 2 <= out.length
-    ) {
-      const numEntries1 = read16(ifd1Offset);
-      if (numEntries1 > 0 && numEntries1 <= 64 && ifd1Offset + 2 + numEntries1 * 12 <= out.length) {
-        for (let i = 0; i < numEntries1; i++) {
-          const entryOffset = ifd1Offset + 2 + i * 12;
-          if (read16(entryOffset) === 0x0112) {
-            writeScalarEntry(entryOffset, 1);
-          }
-        }
-      }
+  return out;
+}
+
+/**
+ * Ensures that a raw EXIF TIFF buffer contains a valid, decodable GPSInfo (0x8825) Sub-IFD in IFD0
+ * whenever valid GPS coordinates are available (e.g. from XMP, a secondary APP1 segment, or ExifSubIFD).
+ * If IFD0 already has a valid GPSInfo Sub-IFD, returns tiffBytes untouched so all original GPS tags remain intact.
+ * Otherwise appends the GPSInfo Sub-IFD at the end of the TIFF buffer without shifting any existing offsets.
+ */
+export function ensureExifGpsInTiff(tiffBytes, gps) {
+  const hasValidGps =
+    gps &&
+    typeof gps.latitude === 'number' &&
+    typeof gps.longitude === 'number' &&
+    !Number.isNaN(gps.latitude) &&
+    !Number.isNaN(gps.longitude);
+  if (!hasValidGps) return tiffBytes;
+
+  if (!tiffBytes || tiffBytes.length < 8) {
+    return buildExifTiffPayload({ gps });
+  }
+
+  // If IFD0 already contains a valid decodable GPSInfo Sub-IFD, keep it byte-for-byte intact
+  if (parseExifGps(tiffBytes, { ifd0Only: true })) {
+    return tiffBytes;
+  }
+
+  const endian = bytesToAscii(tiffBytes, 0, 2);
+  const le = endian === 'II';
+  if (!le && endian !== 'MM') return tiffBytes;
+
+  const read16 = (buf, off) =>
+    le
+      ? (buf[off] | (buf[off + 1] << 8)) >>> 0
+      : ((buf[off] << 8) | buf[off + 1]) >>> 0;
+  const write16 = (buf, off, val) => {
+    if (le) {
+      buf[off] = val & 0xff;
+      buf[off + 1] = (val >>> 8) & 0xff;
+    } else {
+      buf[off] = (val >>> 8) & 0xff;
+      buf[off + 1] = val & 0xff;
+    }
+  };
+  const read32 = (buf, off) => (le ? readU32LE(buf, off) : readU32BE(buf, off));
+  const write32 = (buf, off, val) => (le ? writeU32LE(buf, off, val) : writeU32BE(buf, off, val));
+
+  if (read16(tiffBytes, 2) !== 42) return tiffBytes;
+  const ifd0Offset = read32(tiffBytes, 4);
+  if (ifd0Offset + 2 > tiffBytes.length) return tiffBytes;
+  const numEntries0 = read16(tiffBytes, ifd0Offset);
+  if (numEntries0 > 256 || ifd0Offset + 2 + numEntries0 * 12 + 4 > tiffBytes.length) {
+    return tiffBytes;
+  }
+
+  let existingGpsEntryOff = -1;
+  for (let i = 0; i < numEntries0; i++) {
+    const entryOff = ifd0Offset + 2 + i * 12;
+    if (read16(tiffBytes, entryOff) === 0x8825) {
+      existingGpsEntryOff = entryOff;
+      break;
     }
   }
 
+  const hasAlt = typeof gps.altitude === 'number' && !Number.isNaN(gps.altitude);
+  const gpsEntriesCount = hasAlt ? 7 : 5;
+  const gpsIfdSize = 2 + gpsEntriesCount * 12 + 4;
+  const totalGpsLen = gpsIfdSize + 48 + (hasAlt ? 8 : 0);
+
+  const buildGpsBlockAt = (gpsBaseOffset) => {
+    const latOffset = gpsBaseOffset + gpsIfdSize;
+    const lonOffset = latOffset + 24;
+    const altOffset = lonOffset + 24;
+    const block = new Uint8Array(totalGpsLen);
+    write16(block, 0, gpsEntriesCount);
+
+    const latRefChar = gps.latitude < 0 ? 'S' : 'N';
+    const lonRefChar = gps.longitude < 0 ? 'W' : 'E';
+    const gpsTags = [
+      { tag: 0x0000, type: 1, count: 4, inlineBytes: [2, 3, 0, 0] },
+      { tag: 0x0001, type: 2, count: 2, inlineBytes: [latRefChar.charCodeAt(0), 0, 0, 0] },
+      { tag: 0x0002, type: 5, count: 3, offset: latOffset },
+      { tag: 0x0003, type: 2, count: 2, inlineBytes: [lonRefChar.charCodeAt(0), 0, 0, 0] },
+      { tag: 0x0004, type: 5, count: 3, offset: lonOffset },
+    ];
+    if (hasAlt) {
+      const altBelow = gps.altitude < 0 ? 1 : 0;
+      gpsTags.push(
+        { tag: 0x0005, type: 1, count: 1, inlineBytes: [altBelow, 0, 0, 0] },
+        { tag: 0x0006, type: 5, count: 1, offset: altOffset }
+      );
+    }
+
+    gpsTags.forEach((gt, idx) => {
+      const pos = 2 + idx * 12;
+      write16(block, pos, gt.tag);
+      write16(block, pos + 2, gt.type);
+      write32(block, pos + 4, gt.count);
+      if (gt.inlineBytes) {
+        block.set(gt.inlineBytes, pos + 8);
+      } else {
+        write32(block, pos + 8, gt.offset);
+      }
+    });
+
+    const writeDmsAt = (targetOff, dec) => {
+      const abs = Math.abs(dec);
+      const deg = Math.floor(abs);
+      const minFloat = (abs - deg) * 60;
+      const min = Math.floor(minFloat);
+      const secNum = Math.round((minFloat - min) * 60 * 10000);
+      write32(block, targetOff, deg);
+      write32(block, targetOff + 4, 1);
+      write32(block, targetOff + 8, min);
+      write32(block, targetOff + 12, 1);
+      write32(block, targetOff + 16, secNum);
+      write32(block, targetOff + 20, 10000);
+    };
+
+    writeDmsAt(gpsIfdSize, gps.latitude);
+    writeDmsAt(gpsIfdSize + 24, gps.longitude);
+    if (hasAlt) {
+      const altNum = Math.round(Math.abs(gps.altitude) * 100);
+      write32(block, gpsIfdSize + 48, altNum);
+      write32(block, gpsIfdSize + 52, 100);
+    }
+    return block;
+  };
+
+  if (existingGpsEntryOff >= 0) {
+    const gpsBaseOffset = (tiffBytes.length + 1) & ~1;
+    if (gpsBaseOffset + totalGpsLen > 0xfff7) return tiffBytes;
+    const out = new Uint8Array(gpsBaseOffset + totalGpsLen);
+    out.set(tiffBytes, 0);
+    out.set(buildGpsBlockAt(gpsBaseOffset), gpsBaseOffset);
+    write16(out, existingGpsEntryOff + 2, 4);
+    write32(out, existingGpsEntryOff + 4, 1);
+    write32(out, existingGpsEntryOff + 8, gpsBaseOffset);
+    return out;
+  }
+
+  // Relocate IFD0 to end of TIFF buffer with added 0x8825 entry so zero existing offsets shift
+  const newIfd0Offset = (tiffBytes.length + 1) & ~1;
+  const newNumEntries = numEntries0 + 1;
+  const newIfd0Size = 2 + newNumEntries * 12 + 4;
+  const gpsBaseOffset = newIfd0Offset + newIfd0Size;
+  if (gpsBaseOffset + totalGpsLen > 0xfff7) return tiffBytes;
+
+  const out = new Uint8Array(gpsBaseOffset + totalGpsLen);
+  out.set(tiffBytes, 0);
+  write32(out, 4, newIfd0Offset);
+  write16(out, newIfd0Offset, newNumEntries);
+
+  let inserted = false;
+  let dstIdx = 0;
+  for (let i = 0; i < numEntries0; i++) {
+    const srcOff = ifd0Offset + 2 + i * 12;
+    const tag = read16(tiffBytes, srcOff);
+    if (!inserted && tag > 0x8825) {
+      const gpsEntryOff = newIfd0Offset + 2 + dstIdx * 12;
+      write16(out, gpsEntryOff, 0x8825);
+      write16(out, gpsEntryOff + 2, 4);
+      write32(out, gpsEntryOff + 4, 1);
+      write32(out, gpsEntryOff + 8, gpsBaseOffset);
+      inserted = true;
+      dstIdx++;
+    }
+    out.set(tiffBytes.subarray(srcOff, srcOff + 12), newIfd0Offset + 2 + dstIdx * 12);
+    dstIdx++;
+  }
+  if (!inserted) {
+    const gpsEntryOff = newIfd0Offset + 2 + dstIdx * 12;
+    write16(out, gpsEntryOff, 0x8825);
+    write16(out, gpsEntryOff + 2, 4);
+    write32(out, gpsEntryOff + 4, 1);
+    write32(out, gpsEntryOff + 8, gpsBaseOffset);
+  }
+
+  const oldNextIfdPos = ifd0Offset + 2 + numEntries0 * 12;
+  const newNextIfdPos = newIfd0Offset + 2 + newNumEntries * 12;
+  out.set(tiffBytes.subarray(oldNextIfdPos, oldNextIfdPos + 4), newNextIfdPos);
+  out.set(buildGpsBlockAt(gpsBaseOffset), gpsBaseOffset);
   return out;
 }
 
@@ -792,8 +1089,16 @@ export function extractImageMetadata(buffer, mimeHint = '', fileName = '') {
       // Preserve APP1..APP15 (except APP14 color transform) and COM (0xFE)
       const isAppMetadata = marker >= 0xe1 && marker <= 0xef && marker !== 0xee;
       const isComment = marker === 0xfe;
+      // Skip APP2 Multi-Picture Format ("MPF\0") index segments whose trailing image offsets become invalid after canvas re-encoding
+      const isMpfApp2 =
+        marker === 0xe2 &&
+        payload.length >= 4 &&
+        payload[0] === 0x4d &&
+        payload[1] === 0x50 &&
+        payload[2] === 0x46 &&
+        payload[3] === 0x00;
 
-      if (isAppMetadata || isComment) {
+      if ((isAppMetadata || isComment) && !isMpfApp2) {
         bundle.jpegSegments.push(fullSegment);
         bundle.hasMetadata = true;
 
@@ -1056,7 +1361,7 @@ export function stripImageMetadataBytes(buffer, mimeHint = '') {
  * Injects preserved metadata into an encoded JPEG, PNG, or WebP byte array.
  * Automatically normalizes EXIF & XMP Orientation tags to 1 (upright normal) because
  * the canvas-encoded pixel stream is already oriented upright by the browser,
- * while preserving GPSInfo (0x8825) and all camera/artist/color metadata intact.
+ * while guaranteeing GPSInfo (0x8825) and all camera/artist/color metadata remain intact.
  */
 export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = '') {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer || 0);
@@ -1070,24 +1375,63 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
     let segmentsToInject = [];
 
     if (metadataBundle.jpegSegments && metadataBundle.jpegSegments.length > 0) {
-      segmentsToInject = metadataBundle.jpegSegments.map((seg) => {
+      let hasExifApp1 = false;
+      const exifApp1Segments = [];
+      const otherSegments = [];
+
+      for (const seg of metadataBundle.jpegSegments) {
+        if (
+          seg.length >= 8 &&
+          seg[0] === 0xff &&
+          seg[1] === 0xe2 &&
+          seg[4] === 0x4d &&
+          seg[5] === 0x50 &&
+          seg[6] === 0x46 &&
+          seg[7] === 0x00
+        ) {
+          continue; // Skip broken APP2 "MPF\0" segments
+        }
         if (seg.length >= 10 && seg[0] === 0xff && seg[1] === 0xe1) {
           const payload = seg.slice(4);
           if (isExifApp1Payload(payload)) {
-            const exifHdr = payload.slice(0, 6);
-            const normTiff = normalizeExifOrientation(payload.slice(6));
-            return createJpegSegment(0xe1, concatUint8Arrays([exifHdr, normTiff])) || seg;
+            hasExifApp1 = true;
+            const normTiff = ensureExifGpsInTiff(
+              normalizeExifOrientation(payload.slice(6)),
+              metadataBundle.gps
+            );
+            const built =
+              createJpegSegment(0xe1, concatUint8Arrays([EXIF_HEADER, normTiff])) || seg;
+            exifApp1Segments.push(built);
+            continue;
           }
           if (startsWithBytes(payload, xmpPrefix)) {
             const normXmp = normalizeXmpOrientation(payload.slice(xmpPrefix.length));
-            return createJpegSegment(0xe1, concatUint8Arrays([xmpPrefix, normXmp])) || seg;
+            otherSegments.push(
+              createJpegSegment(0xe1, concatUint8Arrays([xmpPrefix, normXmp])) || seg
+            );
+            continue;
           }
         }
-        return seg;
-      });
+        otherSegments.push(seg);
+      }
+
+      if (!hasExifApp1 && ((metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) || metadataBundle.gps)) {
+        const normTiff = ensureExifGpsInTiff(
+          normalizeExifOrientation(metadataBundle.rawExifTiff),
+          metadataBundle.gps
+        );
+        const seg = createJpegSegment(0xe1, concatUint8Arrays([EXIF_HEADER, normTiff]));
+        if (seg) exifApp1Segments.push(seg);
+      }
+
+      // Place APP1 Exif segment(s) first right after SOI (0xFF 0xD8) per Exif 2.32 Section 4.5.4
+      segmentsToInject = [...exifApp1Segments, ...otherSegments];
     } else {
-      if (metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) {
-        const normTiff = normalizeExifOrientation(metadataBundle.rawExifTiff);
+      if ((metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) || metadataBundle.gps) {
+        const normTiff = ensureExifGpsInTiff(
+          normalizeExifOrientation(metadataBundle.rawExifTiff),
+          metadataBundle.gps
+        );
         const payload = concatUint8Arrays([EXIF_HEADER, normTiff]);
         const seg = createJpegSegment(0xe1, payload);
         if (seg) segmentsToInject.push(seg);
@@ -1142,10 +1486,15 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
     let chunksToInsert = [];
 
     if (metadataBundle.pngChunks && metadataBundle.pngChunks.length > 0) {
+      let hasExifChunk = false;
       chunksToInsert = metadataBundle.pngChunks.map((c) => {
         if (c.type === 'eXIf' && c.data && c.data.length > 0) {
+          hasExifChunk = true;
           const rawTiff = isExifApp1Payload(c.data) ? c.data.slice(6) : c.data;
-          return createPngChunk('eXIf', normalizeExifOrientation(rawTiff));
+          return createPngChunk(
+            'eXIf',
+            ensureExifGpsInTiff(normalizeExifOrientation(rawTiff), metadataBundle.gps)
+          );
         }
         if ((c.type === 'iTXt' || c.type === 'tEXt') && c.data && c.data.length > 0) {
           const normData = normalizeXmpOrientation(c.data);
@@ -1155,10 +1504,21 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
         }
         return c.rawChunk;
       });
+      if (!hasExifChunk && ((metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) || metadataBundle.gps)) {
+        chunksToInsert.unshift(
+          createPngChunk(
+            'eXIf',
+            ensureExifGpsInTiff(normalizeExifOrientation(metadataBundle.rawExifTiff), metadataBundle.gps)
+          )
+        );
+      }
     } else {
-      if (metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) {
+      if ((metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) || metadataBundle.gps) {
         chunksToInsert.push(
-          createPngChunk('eXIf', normalizeExifOrientation(metadataBundle.rawExifTiff))
+          createPngChunk(
+            'eXIf',
+            ensureExifGpsInTiff(normalizeExifOrientation(metadataBundle.rawExifTiff), metadataBundle.gps)
+          )
         );
       }
       if (metadataBundle.rawXmp && metadataBundle.rawXmp.length > 0) {
@@ -1209,12 +1569,19 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
     let flagsMask = 0;
 
     if (metadataBundle.webpChunks && metadataBundle.webpChunks.length > 0) {
+      let hasWebpExif = false;
       for (const c of metadataBundle.webpChunks) {
         let chunkData = c.data;
         if (c.fourCC === 'EXIF' && chunkData && chunkData.length > 0) {
+          hasWebpExif = true;
+          const rawTiff = isExifApp1Payload(chunkData) ? chunkData.slice(6) : chunkData;
+          const normTiff = ensureExifGpsInTiff(
+            normalizeExifOrientation(rawTiff),
+            metadataBundle.gps
+          );
           chunkData = isExifApp1Payload(chunkData)
-            ? concatUint8Arrays([chunkData.slice(0, 6), normalizeExifOrientation(chunkData.slice(6))])
-            : normalizeExifOrientation(chunkData);
+            ? concatUint8Arrays([EXIF_HEADER, normTiff])
+            : normTiff;
         } else if (c.fourCC === 'XMP ' && chunkData && chunkData.length > 0) {
           chunkData = normalizeXmpOrientation(chunkData);
         }
@@ -1223,15 +1590,28 @@ export function injectImageMetadataBytes(buffer, metadataBundle, targetMime = ''
         if (c.fourCC === 'EXIF') flagsMask |= 0x08;
         if (c.fourCC === 'XMP ') flagsMask |= 0x04;
       }
+      if (!hasWebpExif && ((metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) || metadataBundle.gps)) {
+        metaChunks.push({
+          fourCC: 'EXIF',
+          data: ensureExifGpsInTiff(
+            normalizeExifOrientation(metadataBundle.rawExifTiff),
+            metadataBundle.gps
+          ),
+        });
+        flagsMask |= 0x08;
+      }
     } else {
       if (metadataBundle.rawIcc && metadataBundle.rawIcc.length > 0) {
         metaChunks.push({ fourCC: 'ICCP', data: metadataBundle.rawIcc });
         flagsMask |= 0x20;
       }
-      if (metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) {
+      if ((metadataBundle.rawExifTiff && metadataBundle.rawExifTiff.length > 0) || metadataBundle.gps) {
         metaChunks.push({
           fourCC: 'EXIF',
-          data: normalizeExifOrientation(metadataBundle.rawExifTiff),
+          data: ensureExifGpsInTiff(
+            normalizeExifOrientation(metadataBundle.rawExifTiff),
+            metadataBundle.gps
+          ),
         });
         flagsMask |= 0x08;
       }

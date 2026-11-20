@@ -17,6 +17,8 @@ import {
   createJpegSegment,
   parseExifTitle,
   parseExifGps,
+  parseXmpGps,
+  ensureExifGpsInTiff,
   parseExifOrientation,
   normalizeExifOrientation,
   normalizeXmpOrientation,
@@ -613,5 +615,114 @@ test('Synthetic mobile OS photo picker filenames (random numeric IDs & UUIDs) re
     'My_Custom_Photo_Title.jpg'
   );
 });
+
+test('Fujifilm DSCF0141.JPG geolocation edge cases: 0/0 uninitialized GPS template, XMP-to-EXIF GPS synthesis, Big-Endian MM GPS injection, and APP2 MPF filtering', () => {
+  // 1. Build a Fujifilm-style EXIF TIFF with an uninitialized 0/0 GPSInfo IFD template (as cameras without built-in GPS write)
+  const fujiTemplateTiff = buildExifTiffPayload({
+    title: 'Night Streetlamps DSCF0141',
+    make: 'FUJIFILM',
+    model: 'X100V',
+    orientation: 6,
+    width: 1024,
+    height: 682,
+    gps: { latitude: 42.6977, longitude: 23.3219, altitude: 550 },
+  });
+  // Zero out the GPS rational bytes (last 56 bytes of fujiTemplateTiff) to simulate an uninitialized 0/0 camera template or OS redaction
+  const zeroedTemplateTiff = fujiTemplateTiff.slice();
+  zeroedTemplateTiff.fill(0, zeroedTemplateTiff.length - 56);
+
+  assert.equal(
+    parseExifGps(zeroedTemplateTiff),
+    null,
+    'parseExifGps must return null (not {latitude:0, longitude:0}) on a 0/0 uninitialized GPSInfo IFD'
+  );
+
+  // 2. Pair the 0/0 template APP1 EXIF with an XMP segment containing the real geolocation (Sofia: 42°41.862'N, 23°19.314'E, alt 550m)
+  // AND an APP2 "MPF\0" segment + an APP2 ICC_PROFILE placed BEFORE APP1 EXIF
+  const app1ZeroedExif = createJpegSegment(
+    0xe1,
+    new Uint8Array([0x45, 0x78, 0x69, 0x66, 0x00, 0x00, ...zeroedTemplateTiff])
+  );
+  const xmpGpsXml =
+    '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF><rdf:Description exif:GPSLatitude="42,41.862N" exif:GPSLongitude="23,19.314E" exif:GPSAltitude="550/1" exif:GPSAltitudeRef="0"/></rdf:RDF></x:xmpmeta>';
+  const app1Xmp = createJpegSegment(
+    0xe1,
+    new TextEncoder().encode('http://ns.adobe.com/xap/1.0/\0' + xmpGpsXml)
+  );
+  const app2Mpf = createJpegSegment(0xe2, new Uint8Array([0x4d, 0x50, 0x46, 0x00, 0x49, 0x49, 0x2a, 0x00]));
+  const iccPayload = new Uint8Array(14 + 8);
+  iccPayload.set(new TextEncoder().encode('ICC_PROFILE\0'), 0);
+  iccPayload[12] = 1;
+  iccPayload[13] = 1;
+  const app2Icc = createJpegSegment(0xe2, iccPayload);
+
+  const dscf0141Jpeg = new Uint8Array([
+    0xff, 0xd8,
+    ...app2Icc,
+    ...app2Mpf,
+    ...app1ZeroedExif,
+    ...app1Xmp,
+    ...createMinimalJpegBytes().subarray(2),
+  ]);
+
+  const extracted = extractImageMetadata(dscf0141Jpeg, 'image/jpeg', 'DSCF0141.JPG');
+  assert.equal(extracted.hasGps, true);
+  assert.ok(Math.abs(extracted.gps.latitude - 42.6977) < 0.0001);
+  assert.ok(Math.abs(extracted.gps.longitude - 23.3219) < 0.0001);
+  assert.equal(extracted.gps.altitude, 550);
+
+  // Export to JPEG (simulating DSCF0141_2.JPG)
+  const exportedDscf = injectImageMetadataBytes(createMinimalJpegBytes(), extracted, 'image/jpeg');
+  // Verify APP1 Exif is placed FIRST at offset 2 (FF D8 FF E1) and APP2 MPF was stripped
+  assert.equal(exportedDscf[0], 0xff);
+  assert.equal(exportedDscf[1], 0xd8);
+  assert.equal(exportedDscf[2], 0xff);
+  assert.equal(exportedDscf[3], 0xe1);
+
+  const reExtractedDscf = extractImageMetadata(exportedDscf, 'image/jpeg', 'DSCF0141_2.JPG');
+  assert.equal(reExtractedDscf.hasGps, true);
+  assert.equal(reExtractedDscf.orientation, 1);
+  // Verify the primary APP1 Exif TIFF itself now decodes the valid GPS coordinates in IFD0!
+  const directExifGps = parseExifGps(reExtractedDscf.rawExifTiff, { ifd0Only: true });
+  assert.ok(directExifGps, 'Exported DSCF0141_2.JPG primary APP1 EXIF IFD0 must contain valid GPSInfo (0x8825)');
+  assert.ok(Math.abs(directExifGps.latitude - 42.6977) < 0.0001);
+  assert.ok(Math.abs(directExifGps.longitude - 23.3219) < 0.0001);
+  assert.equal(directExifGps.altitude, 550);
+
+  // 3. Test ensureExifGpsInTiff on a Big-Endian ('MM') TIFF that originally had no 0x8825 tag at all
+  const mmNoGps = new Uint8Array(26);
+  const mmView = new DataView(mmNoGps.buffer);
+  mmNoGps[0] = 0x4d; // 'M'
+  mmNoGps[1] = 0x4d; // 'M'
+  mmView.setUint16(2, 42, false);
+  mmView.setUint32(4, 8, false); // IFD0 at 8
+  mmView.setUint16(8, 1, false); // 1 entry
+  mmView.setUint16(10, 0x0112, false); // Orientation
+  mmView.setUint16(12, 3, false); // SHORT
+  mmView.setUint32(14, 1, false);
+  mmView.setUint16(18, 1, false);
+  mmView.setUint32(22, 0, false); // nextIFD = 0
+
+  const mmWithGps = ensureExifGpsInTiff(mmNoGps, {
+    latitude: -33.8568,
+    longitude: 151.2153,
+    altitude: -5.25,
+  });
+  const parsedMmGps = parseExifGps(mmWithGps, { ifd0Only: true });
+  assert.ok(parsedMmGps, 'Expected Big-Endian MM TIFF to have valid IFD0 GPSInfo after ensureExifGpsInTiff');
+  assert.ok(Math.abs(parsedMmGps.latitude - -33.8568) < 0.0001);
+  assert.ok(Math.abs(parsedMmGps.longitude - 151.2153) < 0.0001);
+  assert.equal(parsedMmGps.altitude, -5.25);
+
+  // 4. Test XMP decimal and DMS-with-seconds formats in parseXmpGps
+  const xmpDmsSec = new TextEncoder().encode(
+    '<rdf:Description exif:GPSLatitude="35,39,30.6N" exif:GPSLongitude="139,42,05.4E" exif:GPSAltitude="44.5" exif:GPSAltitudeRef="1"/>'
+  );
+  const parsedDmsSec = parseXmpGps(xmpDmsSec);
+  assert.ok(Math.abs(parsedDmsSec.latitude - 35.6585) < 0.0001);
+  assert.ok(Math.abs(parsedDmsSec.longitude - 139.7015) < 0.0001);
+  assert.equal(parsedDmsSec.altitude, -44.5);
+});
+
 
 

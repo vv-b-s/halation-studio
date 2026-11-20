@@ -859,6 +859,48 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
         const expGpsBytes = new Uint8Array(await expGps.blob.arrayBuffer());
         const expGpsMeta = extractImageMetadata(expGpsBytes, 'image/jpeg', expGps.filename);
 
+        // Part A.4: Fujifilm DSCF0141.JPG with 0/0 uninitialized camera GPSInfo template in APP1 EXIF,
+        // real geolocation in XMP (42.6977° N, 23.3219° E, 550m), APP2 MPF segment, and APP2 ICC placed before APP1
+        const { parseExifGps } = await import('./metadata-utils.js');
+        const fujiTiff = buildExifTiffPayload({
+          title: 'DSCF0141 Streetlamps',
+          make: 'FUJIFILM',
+          model: 'X100V',
+          orientation: 6,
+          width: 120,
+          height: 80,
+          gps: { latitude: 42.6977, longitude: 23.3219, altitude: 550 },
+        });
+        const zeroedFujiTiff = fujiTiff.slice();
+        zeroedFujiTiff.fill(0, zeroedFujiTiff.length - 56);
+        const app1ZeroedFuji = createJpegSegment(
+          0xe1,
+          new Uint8Array([0x45, 0x78, 0x69, 0x66, 0x00, 0x00, ...zeroedFujiTiff])
+        );
+        const app1FujiXmp = createJpegSegment(
+          0xe1,
+          new TextEncoder().encode(
+            'http://ns.adobe.com/xap/1.0/\0<x:xmpmeta><rdf:RDF><rdf:Description exif:GPSLatitude="42,41.862N" exif:GPSLongitude="23,19.314E" exif:GPSAltitude="550/1" exif:GPSAltitudeRef="0"/></rdf:RDF></x:xmpmeta>'
+          )
+        );
+        const app2FujiMpf = createJpegSegment(
+          0xe2,
+          new Uint8Array([0x4d, 0x50, 0x46, 0x00, 0x49, 0x49, 0x2a, 0x00])
+        );
+        const dscfBytes = new Uint8Array([
+          0xff, 0xd8,
+          ...app2FujiMpf,
+          ...app1ZeroedFuji,
+          ...app1FujiXmp,
+          ...sensorRawBytes.subarray(2),
+        ]);
+        const dscfFile = new File([dscfBytes], 'DSCF0141.JPG', { type: 'image/jpeg' });
+        await app.loadUserFile(dscfFile);
+        const expDscf = await app.exportPhoto();
+        const expDscfBytes = new Uint8Array(await expDscf.blob.arrayBuffer());
+        const expDscfMeta = extractImageMetadata(expDscfBytes, 'image/jpeg', expDscf.filename);
+        const expDscfDirectIfd0Gps = parseExifGps(expDscfMeta.rawExifTiff, { ifd0Only: true });
+
         // Part B: PNG with eXIf + tEXt + iTXt XMP
         const tmpCanvas = document.createElement('canvas');
         tmpCanvas.width = 64;
@@ -953,6 +995,9 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
           gpsExportFilename: expGps.filename,
           gpsExportHasGps: expGpsMeta.hasGps,
           gpsExportCoords: expGpsMeta.gps,
+          dscfExportFilename: expDscf.filename,
+          dscfFirstMarker: (expDscfBytes[2] << 8) | expDscfBytes[3],
+          dscfDirectIfd0Gps: expDscfDirectIfd0Gps,
           export1Filename: export1.filename,
           export1HasMetadata: export1Meta.hasMetadata,
           export1Title: export1Meta.title,
@@ -980,8 +1025,9 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
       assert.equal(metaRes.pureHorizHeight, 90);
 
       assert.ok(
-        metaRes.fileInputAccept.includes('application/octet-stream'),
-        'Expected #file-input accept attribute to include application/octet-stream so mobile Chrome bypasses the GPS-stripping Android Photo Picker'
+        metaRes.fileInputAccept.includes('application/octet-stream') &&
+          !metaRes.fileInputAccept.includes('image/*'),
+        'Expected #file-input accept attribute to include application/octet-stream and omit image/* so mobile browsers bypass the GPS-stripping Photo Picker'
       );
       assert.ok(metaRes.gpsBadgeText.includes('GPS'), 'Expected metadata badge to indicate GPS tag detected');
       assert.equal(metaRes.gpsPreviewFilename, 'PXL_20260514_192210.jpg');
@@ -990,6 +1036,13 @@ test('Halation Optical Studio — Full Project End-to-End Browser & Coverage Sui
       assert.ok(Math.abs(metaRes.gpsExportCoords.latitude - 37.8199) < 0.0001);
       assert.ok(Math.abs(metaRes.gpsExportCoords.longitude - -122.4783) < 0.0001);
       assert.equal(metaRes.gpsExportCoords.altitude, 67.5);
+
+      assert.equal(metaRes.dscfExportFilename, 'DSCF0141.JPG');
+      assert.equal(metaRes.dscfFirstMarker, 0xffe1, 'Expected APP1 EXIF immediately after SOI at offset 2');
+      assert.ok(metaRes.dscfDirectIfd0Gps, 'Expected exported DSCF0141.JPG IFD0 to contain valid GPSInfo (0x8825)');
+      assert.ok(Math.abs(metaRes.dscfDirectIfd0Gps.latitude - 42.6977) < 0.0001);
+      assert.ok(Math.abs(metaRes.dscfDirectIfd0Gps.longitude - 23.3219) < 0.0001);
+      assert.equal(metaRes.dscfDirectIfd0Gps.altitude, 550);
 
       assert.equal(metaRes.export1Filename, 'Golden_Gate_Midnight_800T.png');
       assert.equal(metaRes.export1HasMetadata, true);
